@@ -151,6 +151,28 @@ def _detect_ram() -> int:
     return 0
 
 
+def _apple_silicon_gpu() -> tuple[str, int] | None:
+    """Detect an Apple Silicon GPU as (name, usable memory MiB), else None.
+
+    Apple GPUs share unified memory with the CPU — there is no discrete VRAM, so
+    we report total RAM as the pool the GPU can draw from (macOS lets Metal use
+    most of it).
+    # ponytail: unified mem ≈ total RAM; refine via Metal recommendedMaxWorkingSetSize if OOM heuristics misfire
+    """
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return None
+    chip = ""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=5,
+        )
+        chip = out.stdout.strip()
+    except Exception:
+        pass
+    return chip or "Apple Silicon GPU", _detect_ram()
+
+
 def _find_binary(name: str) -> str | None:
     """Find a binary in PATH. Returns path or None."""
     # WSL detection: prefer Linux binaries; Windows binaries under /mnt/c/
@@ -245,6 +267,13 @@ def detect_ik_features(binary_path: str | None = None) -> IkFeatures:
 def detect_hardware() -> HardwareFingerprint:
     """Fingerprint the current hardware and detect llama.cpp backend."""
     gpu_name, vram, driver, cuda_ver = _detect_gpu()
+    # No NVIDIA GPU found — fall back to Apple Silicon (unified memory) if present.
+    if gpu_name == "Unknown" or vram == 0:
+        apple = _apple_silicon_gpu()
+        if apple:
+            gpu_name, vram = apple
+            driver = f"macOS {platform.mac_ver()[0]}"
+            cuda_ver = None
     cpu_name, cpu_cores = _detect_cpu()
     ram = _detect_ram()
 

@@ -206,7 +206,8 @@ def detect():
     table.add_column("Value")
 
     table.add_row("GPU", hw.gpu_name)
-    table.add_row("VRAM", f"{hw.vram_total_mib} MiB")
+    mem_label = "Unified memory" if hw.gpu_name.startswith("Apple") else "VRAM"
+    table.add_row(mem_label, f"{hw.vram_total_mib} MiB")
     table.add_row("Driver", hw.driver_version)
     table.add_row("CUDA", hw.cuda_version or "N/A")
     table.add_row("CPU", hw.cpu_name)

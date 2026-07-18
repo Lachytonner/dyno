@@ -397,9 +397,9 @@ def _hill_climb(
 
 
 def _detect_vram_mib() -> int:
-    """Detect total GPU VRAM in MiB (pynvml, then nvidia-smi). 0 if unknown.
+    """Detect GPU memory in MiB (NVIDIA VRAM, then Apple unified memory). 0 if unknown.
 
-    A single monkeypatchable seam for the tuner's VRAM heuristic.
+    A single monkeypatchable seam for the tuner's memory heuristic.
     """
     try:
         import pynvml
@@ -416,9 +416,13 @@ def _detect_vram_mib() -> int:
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
-        return int(out.stdout.strip()) if out.stdout.strip() else 0
+        if out.stdout.strip():
+            return int(out.stdout.strip())
     except Exception:
-        return 0
+        pass
+    from .detect import _apple_silicon_gpu
+    apple = _apple_silicon_gpu()
+    return apple[1] if apple else 0
 
 
 def _estimate_model_size(model_path: str) -> int:
