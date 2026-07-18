@@ -2,70 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from typing import Callable
-
 import pytest
 
-from llama_dyno.types import BenchParams, TrialResult, TuneResult, model_info_from_path
+from conftest import MockBenchRunner
 
-
-class MockBenchRunner:
-    """Mock that simulates bench runs for testing the search algorithm.
-
-    The mock returns speeds that vary by parameters, allowing us to verify
-    the tuner picks the optimal config.
-    """
-
-    def __init__(self):
-        self.calls: list[BenchParams] = []
-
-    def run(self, model_path: str, params: BenchParams) -> TrialResult:
-        self.calls.append(params)
-
-        # Simulate OOM at very high ngl for "small VRAM" scenarios
-        if params.ngl > 60:
-            return TrialResult(params=params, oom=True, error="CUDA OOM (mocked)")
-
-        # Simulate better performance with flash attention
-        fa_bonus = 1.2 if params.flash_attn else 1.0
-
-        # Simulate KV cache quant effects
-        kv_factor = {"f16": 1.0, "q8_0": 1.05, "q4_0": 1.1}.get(params.ct_k, 1.0)
-
-        # Simulate ngl scaling (more layers = faster up to a point)
-        ngl_factor = min(1.0, params.ngl / 50) * 0.5 + 0.5
-
-        # Simulate batch size sweet spot at 1024
-        batch_penalty = 1.0
-        if params.batch_size < 256:
-            batch_penalty = 0.7
-        elif params.batch_size < 1024:
-            batch_penalty = 0.9  # sub-optimal
-        elif params.batch_size > 2048:
-            batch_penalty = 0.85
-
-        # Simulate thread scaling
-        thread_factor = 1.0
-        if params.threads == 0:
-            thread_factor = 1.0  # auto = good
-        elif params.threads < 4:
-            thread_factor = 0.8
-
-        # Base speed
-        base_pp = 500.0
-        base_tg = 30.0
-
-        pp = base_pp * ngl_factor * fa_bonus * kv_factor * batch_penalty * thread_factor
-        tg = base_tg * ngl_factor * fa_bonus * kv_factor * batch_penalty * thread_factor
-
-        return TrialResult(
-            params=params,
-            pp_tokens_s=pp,
-            tg_tokens_s=tg,
-            oom=False,
-        )
+from llama_dyno.types import BenchParams, TrialResult, model_info_from_path
 
 
 def test_bench_params_to_flag_list():

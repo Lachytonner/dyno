@@ -570,7 +570,7 @@ def submit(
         False, "--quick", help="Quick tune mode before submission"
     ),
 ):
-    """Submit results — creates a Gist with your benchmark."""
+    """Submit results — opens a PR to the community repo, else a Gist, else saves locally."""
     if not validate_model(model):
         console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
         raise typer.Exit(1)

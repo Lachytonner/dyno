@@ -102,13 +102,24 @@ class TrialResult:
 
     @property
     def score(self) -> float:
-        """Combined score weighting both pp and tg throughput."""
-        if self.oom or self.error:
-            return -1.0
-        pp = self.pp_tokens_s or 0
-        tg = self.tg_tokens_s or 0
-        # Weight prompt processing less than generation (typically 1:1 or 1:2)
-        return pp * 0.3 + tg * 0.7
+        """Combined score with default weights.
+
+        Convenience wrapper; use score_trial() directly to pass custom weights.
+        """
+        return score_trial(self)
+
+
+def score_trial(
+    trial: TrialResult, pp_weight: float = 0.3, tg_weight: float = 0.7
+) -> float:
+    """Combined pp/tg throughput score. OOM/error trials score -1.
+
+    Single source of truth for trial scoring — both TrialResult.score and the
+    tuner's scoring call through here so custom weights are always honored.
+    """
+    if trial.oom or trial.error:
+        return -1.0
+    return (trial.pp_tokens_s or 0) * pp_weight + (trial.tg_tokens_s or 0) * tg_weight
 
 
 @dataclass

@@ -13,7 +13,7 @@ from .bench import (
     find_bench_binary,
     run_bench,
 )
-from .types import BenchParams, TrialResult, TuneResult
+from .types import BenchParams, TrialResult, TuneResult, score_trial
 
 console = Console()
 
@@ -37,18 +37,8 @@ class TuneConfig:
 
 
 def _score_trial(t: TrialResult, pp_weight: float = 0.3, tg_weight: float = 0.7) -> float:
-    """Combined score weighting pp and tg throughput.
-
-    Args:
-        t: Trial result.
-        pp_weight: Weight for prompt-processing throughput (default 0.3).
-        tg_weight: Weight for text-generation throughput (default 0.7).
-    """
-    if t.oom or t.error:
-        return -1.0
-    pp = t.pp_tokens_s or 0
-    tg = t.tg_tokens_s or 0
-    return pp * pp_weight + tg * tg_weight
+    """Score a trial via the canonical scorer in types.score_trial."""
+    return score_trial(t, pp_weight, tg_weight)
 
 
 def build_progress_table(trials: list[TrialResult]) -> Table:
@@ -406,6 +396,31 @@ def _hill_climb(
     return best_params
 
 
+def _detect_vram_mib() -> int:
+    """Detect total GPU VRAM in MiB (pynvml, then nvidia-smi). 0 if unknown.
+
+    A single monkeypatchable seam for the tuner's VRAM heuristic.
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        vram = pynvml.nvmlDeviceGetMemoryInfo(handle).total // (1024 * 1024)
+        pynvml.nvmlShutdown()
+        return int(vram)
+    except Exception:
+        pass
+    import subprocess as sp
+    try:
+        out = sp.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return int(out.stdout.strip()) if out.stdout.strip() else 0
+    except Exception:
+        return 0
+
+
 def _estimate_model_size(model_path: str) -> int:
     """Estimate model file size in MiB."""
     import os
@@ -475,28 +490,7 @@ def run_tune(
         console.print("  Model type: Dense (skipping MoE-specific tuning)")
     console.print()
 
-    # Detect GPU VRAM
-    vram_total = 0
-    try:
-        import pynvml
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        vram_total = pynvml.nvmlDeviceGetMemoryInfo(handle).total // (1024 * 1024)
-        pynvml.nvmlShutdown()
-    except Exception:
-        pass
-    # Fallback nvidia-smi
-    if vram_total == 0:
-        import subprocess as sp
-        try:
-            out = sp.run(
-                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            )
-            vram_total = int(out.stdout.strip()) if out.stdout.strip() else 0
-        except Exception:
-            pass
-
+    vram_total = _detect_vram_mib()
     model_size_mib = _estimate_model_size(model_path)
 
     console.print(f"[bold]Dyno Tuning[/] - mode: {mode}")
