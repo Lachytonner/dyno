@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Auto-tune and benchmark llama.cpp / ik_llama.cpp inference on NVIDIA GPUs"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "Apache-2.0"
 authors = [
   { name = "Flowdesk Systems", email = "lachy@flowdesk.systems" },
 ]
