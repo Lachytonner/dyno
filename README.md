@@ -141,6 +141,20 @@ Submit your results to the community results repo (`llama-dyno-results`):
 | RTX 3090 | Mistral-7B | Q4_K_M | llama.cpp | 112.8 |
 | RTX 4060 | Phi-3-mini | Q4_K_M | llama.cpp | 68.5 |
 
+## Shell Completions
+
+Dyno supports shell completions via Typer/Click:
+
+```bash
+# Install completions for your shell
+dyno --install-completion
+
+# Show completion script (to manually install)
+dyno --show-completion
+```
+
+Supported shells: bash, zsh, fish, powershell.
+
 ## Architecture
 
 ```

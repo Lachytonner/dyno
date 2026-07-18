@@ -22,6 +22,16 @@ except ImportError:
     HAS_PSUTIL = False
 
 
+def _is_wsl() -> bool:
+    """Check if running under Windows Subsystem for Linux."""
+    try:
+        with open("/proc/version") as f:
+            content = f.read().lower()
+            return "microsoft" in content or "wsl" in content
+    except Exception:
+        return False
+
+
 def _detect_gpu() -> tuple[str, int, str, str | None]:
     """Detect NVIDIA GPU info using pynvml. Returns (name, vram_mib, driver, cuda_version)."""
     try:
@@ -144,6 +154,8 @@ def _detect_ram() -> int:
 
 def _find_binary(name: str) -> str | None:
     """Find a binary in PATH. Returns path or None."""
+    # WSL detection: prefer Linux binaries; Windows binaries under /mnt/c/
+    # would need a separate discovery step.
     if os.name == "nt":
         name_exe = f"{name}.exe"
     else:

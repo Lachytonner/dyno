@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dyno — llama.cpp Auto-Tuner & Benchmark</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2128;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --accent: #58a6ff;
+      --accent2: #3fb950;
+      --accent3: #d29922;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* --- Nav --- */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      max-width: 928px;
+      margin: 0 auto;
+    }
+    nav .brand {
+      font-size: 1.4rem;
+      font-weight: 700;
+    }
+    nav a {
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 0.9rem;
+      transition: color 0.2s;
+    }
+    nav a:hover { color: var(--accent); }
+
+    /* --- Hero --- */
+    .hero {
+      padding: 80px 0 60px;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 2.8rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+      margin-bottom: 16px;
+    }
+    .hero h1 span { color: var(--accent); }
+    .hero p {
+      color: var(--text-dim);
+      font-size: 1.15rem;
+      max-width: 600px;
+      margin: 0 auto 32px;
+    }
+    .hero-badges {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .hero-badges a {
+      display: inline-block;
+      padding: 10px 22px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }
+    .hero-badges a:hover { opacity: 0.85; }
+    .btn-primary {
+      background: var(--accent);
+      color: #0d1117;
+    }
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    /* --- Sections --- */
+    section { padding: 60px 0; }
+    section + section { border-top: 1px solid var(--border); }
+
+    h2 {
+      font-size: 1.7rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    h2 + p { color: var(--text-dim); margin-bottom: 32px; }
+
+    h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      margin-top: 24px;
+    }
+    h3:first-of-type { margin-top: 0; }
+
+    /* --- Commands grid --- */
+    .commands { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .cmd-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .cmd-card code {
+      font-size: 0.95rem;
+      font-weight: 600;
+      white-space: nowrap;
+      min-width: 140px;
+      color: var(--accent);
+    }
+    .cmd-card .desc { color: var(--text-dim); font-size: 0.95rem; }
+    .cmd-card .desc strong { color: var(--text); }
+
+    /* --- Code blocks --- */
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px 20px;
+      overflow-x: auto;
+      font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    pre .kw   { color: #ff7b72; }
+    pre .fg   { color: #d2a8ff; }
+    pre .str  { color: #a5d6ff; }
+    pre .num  { color: #79c0ff; }
+    pre .dim  { color: #484f58; }
+    pre .green { color: var(--accent2); }
+    pre .yellow { color: var(--accent3); }
+
+    code {
+      font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+      background: var(--bg-code);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+
+    /* --- Quickstart steps --- */
+    .steps { counter-reset: step; }
+    .step {
+      counter-increment: step;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 12px;
+    }
+    .step::before {
+      content: counter(step);
+      display: inline-block;
+      width: 26px;
+      height: 26px;
+      line-height: 26px;
+      text-align: center;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #0d1117;
+      font-weight: 700;
+      font-size: 0.85rem;
+      margin-bottom: 8px;
+    }
+
+    /* --- Footer --- */
+    footer {
+      text-align: center;
+      padding: 48px 24px;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* --- Responsive --- */
+    @media (max-width: 640px) {
+      .hero h1 { font-size: 2rem; }
+      .cmd-card { flex-direction: column; gap: 6px; }
+      .cmd-card code { min-width: auto; }
+      nav .brand { font-size: 1.1rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="brand">🏎️ Dyno</div>
+    <a href="https://github.com/lachy/llama-dyno" target="_blank">GitHub</a>
+  </nav>
+
+  <div class="container">
+    <!-- Hero -->
+    <section class="hero">
+      <h1>🏎️ <span>Dyno</span> — llama.cpp Auto-Tuner &amp; Benchmark</h1>
+      <p>
+        Open-source CLI that auto-tunes and benchmarks llama.cpp / ik_llama.cpp
+        inference on NVIDIA GPUs. Find the fastest config in seconds.
+      </p>
+      <div class="hero-badges">
+        <a class="btn-primary" href="#quickstart">Get Started</a>
+        <a class="btn-secondary" href="https://github.com/lachy/llama-dyno" target="_blank">View on GitHub</a>
+      </div>
+    </section>
+
+    <!-- Quickstart -->
+    <section id="quickstart">
+      <h2>⚡ Quickstart</h2>
+      <p>Install Dyno and tune your first model in under a minute.</p>
+      <div class="steps">
+        <div class="step">
+          <h3>Install</h3>
+          <pre><span class="fg">pipx</span> install llama-dyno</pre>
+        </div>
+        <div class="step">
+          <h3>Detect hardware</h3>
+          <pre><span class="fg">dyno</span> detect</pre>
+          <p style="margin-top:8px;color:var(--text-dim);font-size:0.9rem;">
+            Fingerprints your GPU, VRAM, driver version, CPU, RAM, and detects
+            which llama.cpp backend is installed.
+          </p>
+        </div>
+        <div class="step">
+          <h3>Auto-tune a model</h3>
+          <pre><span class="fg">dyno</span> tune ~/models/mistral-7b.Q4_K_M.gguf <span class="yellow">--quick</span></pre>
+          <p style="margin-top:8px;color:var(--text-dim);font-size:0.9rem;">
+            Finds the fastest config — ngl, flash attention, KV cache quant,
+            batch size, threads — with live progress.
+          </p>
+        </div>
+        <div class="step">
+          <h3>Benchmark</h3>
+          <pre><span class="fg">dyno</span> bench ~/models/mistral-7b.Q4_K_M.gguf <span class="yellow">--ngl</span> <span class="num">99</span> <span class="yellow">--fa</span></pre>
+        </div>
+        <div class="step">
+          <h3>Generate a report</h3>
+          <pre><span class="fg">dyno</span> report ~/models/mistral-7b.Q4_K_M.gguf</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Commands -->
+    <section id="commands">
+      <h2>📖 Commands</h2>
+      <p>Every command Dyno offers.</p>
+      <div class="commands">
+        <div class="cmd-card">
+          <code>dyno detect</code>
+          <div class="desc">
+            Fingerprint hardware — GPU model, VRAM, driver/CUDA version, CPU,
+            RAM, and detect which llama.cpp backend is installed (with commit hash).
+          </div>
+        </div>
+        <div class="cmd-card">
+          <code>dyno tune &lt;model&gt;</code>
+          <div class="desc">
+            Find the fastest config for your GPU + model combo. Uses a smart search:
+            validate → coarse sweep (ngl, flash attn, KV cache) → hill-climb
+            (batch size, threads). Supports <strong>--quick</strong> (~10 trials)
+            and <strong>--thorough</strong> (~25 trials) modes.
+          </div>
+        </div>
+        <div class="cmd-card">
+          <code>dyno bench &lt;model&gt;</code>
+          <div class="desc">
+            Run a specific config 3× and report median tokens/sec with variance.
+            Flags: <strong>--ngl</strong>, <strong>--fa/--no-fa</strong>,
+            <strong>--ctk</strong>, <strong>--ctv</strong>, <strong>--batch</strong>,
+            <strong>--ubatch</strong>, <strong>--threads</strong>,
+            <strong>--fmoe</strong>, <strong>--rtr</strong>, <strong>--amb</strong>.
+          </div>
+        </div>
+        <div class="cmd-card">
+          <code>dyno report &lt;model&gt;</code>
+          <div class="desc">
+            Generate a shareable report with hardware fingerprint, model details,
+            winning config, median scores with variance, reproducible
+            llama-server command, and shareable markdown snippet. Output as JSON.
+          </div>
+        </div>
+        <div class="cmd-card">
+          <code>dyno submit &lt;model&gt;</code>
+          <div class="desc">
+            Submit your results to the community results repo. Opens a PR via
+            <strong>gh</strong> CLI, falls back to a GitHub Gist, or saves locally.
+          </div>
+        </div>
+        <div class="cmd-card">
+          <code>dyno search [gpu] [model]</code>
+          <div class="desc">
+            Search local result JSON files for matching GPU and/or model keywords.
+            Filters by case-insensitive substring match across all saved reports.
+          </div>
+        </div>
+        <div class="cmd-card">
+          <code>dyno compare [gpu] [model]</code>
+          <div class="desc">
+            Compare multiple benchmark results side-by-side. Filter by GPU type
+            and model name to see how different configs stack up.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Example Output -->
+    <section id="example">
+      <h2>🔬 Example Output</h2>
+      <p>Dyno's Rich-powered terminal output.</p>
+
+      <h3>System Detection</h3>
+      <pre><span class="green">┌──────────────────────────────────────────┐</span>
+<span class="green">│</span> <span class="kw">System Detection</span>                        <span class="green">│</span>
+<span class="green">├──────────────────────────────────────────┤</span>
+<span class="green">│ Component       Value                   │</span>
+<span class="green">├──────────────────────────────────────────┤</span>
+<span class="green">│</span> GPU      <span class="str">NVIDIA GeForce RTX 4090</span>        <span class="green">│</span>
+<span class="green">│</span> VRAM     <span class="num">24564</span> MiB                      <span class="green">│</span>
+<span class="green">│</span> Driver   <span class="num">545.23.08</span>                      <span class="green">│</span>
+<span class="green">│</span> CUDA     <span class="num">12.3</span>                          <span class="green">│</span>
+<span class="green">│</span> CPU      AMD Ryzen 9 7950X              <span class="green">│</span>
+<span class="green">│</span> Cores    <span class="num">16</span>                             <span class="green">│</span>
+<span class="green">│</span> RAM      <span class="num">64228</span> MiB                      <span class="green">│</span>
+<span class="green">│</span> Backend  llama.cpp                      <span class="green">│</span>
+<span class="green">│</span> Commit   <span class="str">b1c2d3e</span>                        <span class="green">│</span>
+<span class="green">└──────────────────────────────────────────┘</span></pre>
+
+      <h3>Benchmark Results</h3>
+      <pre><span class="green">┌──────────────────────────────────────────┐</span>
+<span class="green">│</span> <span class="kw">Benchmark Results</span>                      <span class="green">│</span>
+<span class="green">├──────────────────────────────────────────┤</span>
+<span class="green">│</span> Metric                    Median  Var   <span class="green">│</span>
+<span class="green">├──────────────────────────────────────────┤</span>
+<span class="green">│</span> PP (prompt processing)   <span class="num">520.3</span>   <span class="num">1.2</span>    <span class="green">│</span>
+<span class="green">│</span> TG (text generation)     <span class="num">58.7</span>    <span class="num">0.4</span>    <span class="green">│</span>
+<span class="green">└──────────────────────────────────────────┘</span>
+
+<span class="green">✓</span> Generation: <span class="num">58.7</span> tok/s | Prompt: <span class="num">520.3</span> tok/s</pre>
+
+      <h3>Winning Config (Post-Tune)</h3>
+      <pre><span class="green">╭──────────────────────────────────────╮</span>
+<span class="green">│</span> <span class="kw">🏆 Best Config</span>                      <span class="green">│</span>
+<span class="green">├──────────────────────────────────────┤</span>
+<span class="green">│</span> ngl=<span class="num">99</span>, fa=<span class="str">✓</span>, ctk=f16, ctv=f16       <span class="green">│</span>
+<span class="green">│</span> batch=<span class="num">1024</span>, ubatch=<span class="num">512</span>, threads=<span class="num">0</span>    <span class="green">│</span>
+<span class="green">╰──────────────────────────────────────╯</span></pre>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+      <p>🏎️ <strong>Dyno</strong> — llama.cpp Auto-Tuner &amp; Benchmark</p>
+      <p style="margin-top:4px;">
+        <a href="https://github.com/lachy/llama-dyno" target="_blank">GitHub</a>
+        &nbsp;·&nbsp; Apache 2.0 License
+      </p>
+    </footer>
+  </div>
+</body>
+</html>

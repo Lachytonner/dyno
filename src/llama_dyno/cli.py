@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -17,6 +18,17 @@ from .submit import submit_report
 from .tune import TuneConfig, build_progress_table, run_bench_final, run_tune
 from .types import BenchParams, TuneResult
 
+log = logging.getLogger("dyno")
+
+
+def setup_logging(level: str = "WARNING") -> None:
+    """Configure dyno logging with the given level."""
+    logging.basicConfig(
+        format="%(levelname)-8s | %(message)s",
+        level=getattr(logging, level.upper(), logging.WARNING),
+    )
+
+
 app = typer.Typer(
     name="dyno",
     help="Auto-tune and benchmark llama.cpp / ik_llama.cpp inference on NVIDIA GPUs.",
@@ -25,6 +37,19 @@ app = typer.Typer(
 console = Console()
 
 DYNOVERSION = "0.1.0"
+
+
+@app.callback()
+def main_options(
+    ctx: typer.Context,
+    log_level: str = typer.Option(
+        "WARNING", "--log-level", "-l",
+        help="Logging level: DEBUG, INFO, WARNING, ERROR",
+        case_sensitive=False,
+    ),
+) -> None:
+    """Configure global options."""
+    setup_logging(log_level)
 
 
 def _truncate_model_path(path: str, max_len: int = 50) -> str:
@@ -43,9 +68,138 @@ def _truncate_model_path(path: str, max_len: int = 50) -> str:
     return path[:half] + "..." + path[-half:]
 
 
+def _check_mark(passed: bool, label: str) -> str:
+    """Return a Rich-formatted check mark string for doctor output."""
+    if passed:
+        return f"[green]✓ PASS[/] {label}"
+    return f"[red]✗ FAIL[/] {label}"
+
+
+@app.command()
+def doctor(
+    model: str = typer.Argument(None, help="Optional model path to validate loading"),
+) -> None:
+    """Run comprehensive system diagnostics."""
+    import json
+    import platform as plat_mod
+    import subprocess
+
+    passed = 0
+    total = 0
+
+    console.print("[bold]Dyno Doctor — System Diagnostics[/]")
+    console.print()
+
+    # 1. Python check
+    total += 1
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    plat = plat_mod.platform()
+    console.print(_check_mark(True, f"Python {py_ver} on {plat}"))
+    passed += 1
+
+    # 2. GPU check
+    total += 1
+    hw = detect_hardware()
+    if hw.gpu_name != "Unknown" and hw.vram_total_mib > 0:
+        console.print(_check_mark(
+            True,
+            f"GPU: {hw.gpu_name} ({hw.vram_total_mib} MiB VRAM, "
+            f"driver {hw.driver_version}, CUDA {hw.cuda_version or 'N/A'})",
+        ))
+        passed += 1
+    else:
+        console.print(_check_mark(False, "No NVIDIA GPU detected"))
+
+    # 3. Binary checks
+    total += 1
+    bench_bin = find_bench_binary()
+    if bench_bin:
+        console.print(_check_mark(True, f"llama-bench: {bench_bin}"))
+        passed += 1
+    else:
+        console.print(_check_mark(False, "llama-bench Not found"))
+
+    total += 1
+    server_bin = find_server_binary()
+    if server_bin:
+        console.print(_check_mark(True, f"llama-server: {server_bin}"))
+        passed += 1
+    else:
+        console.print(_check_mark(False, "llama-server Not found"))
+
+    # 4. llama-bench smoke test
+    total += 1
+    if bench_bin:
+        try:
+            result = subprocess.run(
+                [bench_bin, "-o", "json", "-p", "1", "-n", "1", "-ngl", "0"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                try:
+                    json.loads(result.stdout)
+                    console.print(_check_mark(True, "llama-bench responds"))
+                    passed += 1
+                except json.JSONDecodeError:
+                    console.print(_check_mark(
+                        False,
+                        f"llama-bench output not valid JSON: {result.stdout.strip()[:100]}",
+                    ))
+            else:
+                err = (result.stderr or result.stdout)[:200]
+                console.print(_check_mark(False, f"llama-bench failed: {err.strip()}"))
+        except subprocess.TimeoutExpired:
+            console.print(_check_mark(False, "llama-bench timed out"))
+        except Exception as e:
+            console.print(_check_mark(False, f"llama-bench error: {e}"))
+    else:
+        console.print(_check_mark(False, "llama-bench not available (skipped)"))
+
+    # 5. Model check (optional)
+    if model:
+        total += 1
+        if validate_model(model):
+            size_mib = Path(model).stat().st_size // (1024 * 1024)
+            console.print(_check_mark(True, f"Model: {Path(model).name} ({size_mib} MiB)"))
+            passed += 1
+        else:
+            console.print(_check_mark(False, "Model not found or not a .gguf file"))
+
+        # 6. Model load test
+        total += 1
+        if bench_bin and validate_model(model):
+            try:
+                result = subprocess.run(
+                    [bench_bin, "-m", model, "-p", "1", "-n", "1", "-ngl", "0", "-o", "json"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode == 0:
+                    console.print(_check_mark(True, "Model loads successfully"))
+                    passed += 1
+                else:
+                    err = (result.stderr or result.stdout)[:200]
+                    console.print(_check_mark(False, f"Model load failed: {err.strip()}"))
+            except subprocess.TimeoutExpired:
+                console.print(_check_mark(False, "Model load timed out"))
+            except Exception as e:
+                console.print(_check_mark(False, f"Model load error: {e}"))
+        else:
+            console.print(_check_mark(
+                False, "Cannot test model load (bench binary or model unavailable)",
+            ))
+
+    # Summary
+    console.print()
+    if passed == total:
+        console.print(f"[green]All {passed}/{total} checks passed![/]")
+    else:
+        console.print(f"[yellow]{passed}/{total} checks passed[/]")
+
+
 @app.command()
 def detect():
     """Fingerprint hardware and detect llama.cpp backend."""
+    log.debug("Detecting hardware...")
     hw = detect_hardware()
 
     table = Table(title="System Detection", box=None)
@@ -127,6 +281,7 @@ def tune(
     ),
 ):
     """Find the fastest config for this GPU + model combo."""
+    log.debug("Starting tune for %s", model)
     if not validate_model(model):
         console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
         raise typer.Exit(1)
@@ -267,6 +422,8 @@ def bench(
         rtr=rtr,
         amb=amb,
     )
+    log.debug("Running benchmark with ngl=%d fa=%s ctk=%s ctv=%s batch=%d ubatch=%d threads=%d",
+              ngl, flash_attn, ctk, ctv, batch, ubatch, threads)
 
     console.print(f"[bold]Benchmarking[/] with {runs} runs...")
 
@@ -693,5 +850,4 @@ def compare(
     console.print(table)
 
 
-def main():
-    app()
+

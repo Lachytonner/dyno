@@ -8,7 +8,7 @@ from typing import Callable
 
 import pytest
 
-from llama_dyno.types import BenchParams, TrialResult, TuneResult
+from llama_dyno.types import BenchParams, TrialResult, TuneResult, model_info_from_path
 
 
 class MockBenchRunner:
@@ -191,3 +191,76 @@ def test_trial_scoring_rejects_oom():
 
     assert oom.score == -1.0
     assert working.score > oom.score
+
+
+def test_trial_result_score_none_values():
+    """Score should return 0 when both pp and tg are None (not OOM/error)."""
+    t = TrialResult(params=BenchParams(), pp_tokens_s=None, tg_tokens_s=None)
+    assert t.score == 0.0
+
+
+def test_bench_params_clone_independent():
+    """Clone should create an independent copy."""
+    original = BenchParams(ngl=50, flash_attn=True, batch_size=1024)
+    cloned = original.clone()
+    assert cloned.ngl == 50
+    assert cloned.flash_attn is True
+    assert cloned.batch_size == 1024
+
+    # Modify original, clone should not change
+    original.ngl = 30
+    assert cloned.ngl == 50, "Clone should be independent"
+
+
+def test_bench_params_to_dict():
+    """to_dict should return correct fields."""
+    params = BenchParams(ngl=99, flash_attn=False, threads=8, fmoe=True)
+    d = params.to_dict()
+    assert d["ngl"] == 99
+    assert d["flash_attn"] is False
+    assert d["threads"] == 8
+    assert d["fmoe"] is True
+    assert "batch_size" in d
+    assert "ct_k" in d
+
+
+def test_model_info_from_path_basic():
+    """Test model_info_from_path with a basic filename."""
+    import os
+    import tempfile
+
+    content = b"\x00" * 1024  # 1 KiB dummy GGUF
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(content)
+        tmp_path = f.name
+    try:
+        info = model_info_from_path(tmp_path)
+        assert info.path.endswith(".gguf")
+        assert info.name.endswith(".gguf")
+        assert info.file_size_bytes == 1024
+        assert len(info.sha256) == 64  # SHA256 hex length
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_model_info_from_path_quantization():
+    """Test quantization extraction from filename."""
+    import os
+    import shutil
+    import tempfile
+
+    content = b"\x00" * 1024
+    with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as f:
+        f.write(content)
+        tmp_path = f.name
+
+    parent = os.path.dirname(tmp_path)
+    q_path = os.path.join(parent, "llama-3.2-3b-Q4_K_M.gguf")
+    shutil.copy(tmp_path, q_path)
+    try:
+        info = model_info_from_path(q_path)
+        assert info.quantization == "Q4_K_M"
+        assert info.name == "llama-3.2-3b-Q4_K_M.gguf"
+    finally:
+        os.unlink(q_path)
+        os.unlink(tmp_path)
