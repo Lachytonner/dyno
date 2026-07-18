@@ -72,7 +72,7 @@ def build_progress_table(trials: list[TrialResult]) -> Table:
         if t.oom:
             status = "[red]OOM[/]"
         elif t.error:
-            status = f"[red]ERR[/]"
+            status = "[red]ERR[/]"
         else:
             status = "[green]OK[/]"
 
@@ -284,7 +284,6 @@ def _hill_climb(
         thread_counts = [0, total_cores // 4, total_cores // 2, total_cores]
 
     # Hill climb on batch first
-    best_batch = best_params.batch_size
     improved = True
     stale_trials = 0
     while improved and len(trials) < config.max_trials:
@@ -322,7 +321,6 @@ def _hill_climb(
                 best_score = score
                 best_params.batch_size = bs
                 best_params.ubatch_size = test_params.ubatch_size
-                best_batch = bs
                 improved = True
 
     # Hill climb on threads

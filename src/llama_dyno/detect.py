@@ -7,12 +7,11 @@ import platform
 import re
 import subprocess
 import warnings
-from pathlib import Path
+
+from .types import HardwareFingerprint, IkFeatures
 
 # Suppress pynvml deprecation warning from nvidia-ml-py
 warnings.filterwarnings("ignore", message="The pynvml package is deprecated")
-
-from .types import HardwareFingerprint, IkFeatures
 
 # Optional psutil for RAM detection
 try:
@@ -54,7 +53,7 @@ def _detect_gpu() -> tuple[str, int, str, str | None]:
             cuda_ver = None
         pynvml.nvmlShutdown()
         return name, int(vram), driver, cuda_ver
-    except Exception as e:
+    except Exception:
         # Fallback: try nvidia-smi
         try:
             out = subprocess.run(
@@ -91,7 +90,7 @@ def _detect_cpu() -> tuple[str, int]:
                 ["wmic", "cpu", "get", "name"],
                 capture_output=True, text=True, timeout=5,
             )
-            lines = [l.strip() for l in out.stdout.strip().splitlines() if l.strip()]
+            lines = [line.strip() for line in out.stdout.strip().splitlines() if line.strip()]
             if len(lines) > 1:
                 cpu_name = lines[1]
         elif platform.system() == "Linux":
@@ -144,7 +143,7 @@ def _detect_ram() -> int:
                 ["wmic", "computersystem", "get", "TotalPhysicalMemory"],
                 capture_output=True, text=True, timeout=5,
             )
-            lines = [l.strip() for l in out.stdout.strip().splitlines() if l.strip()]
+            lines = [line.strip() for line in out.stdout.strip().splitlines() if line.strip()]
             if len(lines) > 1:
                 return int(lines[1]) // (1024 * 1024)
         except Exception:

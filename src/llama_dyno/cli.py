@@ -12,11 +12,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__ as DYNOVERSION
-from .bench import find_bench_binary, find_server_binary, run_bench, validate_model
+from .bench import find_bench_binary, find_server_binary, validate_model
 from .detect import detect_hardware
 from .report import build_report, format_json, format_markdown, save_report_json
 from .submit import submit_report
-from .tune import TuneConfig, build_progress_table, run_bench_final, run_tune
+from .tune import build_progress_table, run_bench_final, run_tune
 from .types import BenchParams, TuneResult
 
 log = logging.getLogger("dyno")
@@ -602,7 +602,7 @@ def submit(
     console.print("  Submitting...")
     try:
         url = submit_report(report_data)
-        console.print(f"[green]✓[/] Results submitted!")
+        console.print("[green]✓[/] Results submitted!")
         console.print(f"   {url}")
     except RuntimeError as e:
         console.print(f"[red]{e}[/]")
@@ -653,7 +653,6 @@ def search(
             continue
 
         # Extract display fields
-        wp = data.get("winning_params", {})
         results_data = data.get("results", {})
         quant = model_info.get("quantization") or "N/A"
         backend = hw.get("backend", "N/A")

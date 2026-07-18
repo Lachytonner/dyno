@@ -6,7 +6,6 @@ import json
 import os
 import re
 import subprocess
-import time
 
 from .detect import _find_binary
 from .types import BenchParams, TrialResult
@@ -238,12 +237,9 @@ def run_bench(
     cmd = [binary, "-m", model_path, "-o", "json"] + params.to_flag_list()
 
     try:
-        start = time.monotonic()
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
         )
-        elapsed = time.monotonic() - start
-
     except FileNotFoundError:
         return TrialResult(
             params=params,

@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 from .bench import get_reproducible_command
 from .detect import detect_hardware
 from .types import (
-    BenchParams,
     HardwareFingerprint,
-    ModelInfo,
-    TrialResult,
     TuneResult,
     default_report,
     model_info_from_path,
