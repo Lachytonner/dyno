@@ -238,10 +238,12 @@ def run_bench(
     )
 
     if result.returncode != 0 and not is_oom:
+        stderr_lines = result.stderr.splitlines()
+        prefixed = "\n".join(f"  > {line}" for line in stderr_lines)
         return TrialResult(
             params=params,
             oom=False,
-            error=f"llama-bench failed (exit {result.returncode}):\n{result.stderr[:500]}",
+            error=f"llama-bench failed (exit {result.returncode})\n{prefixed}",
         )
 
     if is_oom:

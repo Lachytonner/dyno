@@ -170,6 +170,10 @@ def _coarse_sweep_ngl(
             params.rtr = True
             params.amb = True
 
+        # Skip if trial with identical params already exists
+        if any(t.params == params for t in trials):
+            continue
+
         result = _run_trial(model_path, params, binary, config)
         trials.append(result)
 
@@ -234,6 +238,10 @@ def _hill_climb(
             test_params.batch_size = bs
             test_params.ubatch_size = min(bs, 512)
 
+            # Skip if trial with identical params already exists
+            if any(t.params == test_params for t in trials):
+                continue
+
             result = _run_trial(model_path, test_params, binary, config)
             trials.append(result)
 
@@ -258,6 +266,10 @@ def _hill_climb(
             test_params = best_params.clone()
             test_params.threads = tc
 
+            # Skip if trial with identical params already exists
+            if any(t.params == test_params for t in trials):
+                continue
+
             result = _run_trial(model_path, test_params, binary, config)
             trials.append(result)
 
@@ -280,6 +292,10 @@ def _hill_climb(
             test_params.fmoe = fmoe_val
             test_params.rtr = rtr_val
             test_params.amb = amb_val
+
+            # Skip if trial with identical params already exists
+            if any(t.params == test_params for t in trials):
+                continue
 
             result = _run_trial(model_path, test_params, binary, config)
             trials.append(result)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -152,6 +153,14 @@ def model_info_from_path(path: str) -> ModelInfo:
         if f"-{q}" in name or f"_{q}" in name:
             info.quantization = q
             break
+
+    # Fallback: scan for -Q or _Q patterns followed by a number
+    # (handles QAT-style quants like QAT-Q4_0 that may not be in the known list)
+    if info.quantization is None:
+        m = re.search(r'[-_]([qQ]\d[-_\w]*)', name)
+        if m:
+            info.quantization = m.group(1)
+
     return info
 
 

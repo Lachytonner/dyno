@@ -27,6 +27,22 @@ console = Console()
 DYNOVERSION = "0.1.0"
 
 
+def _truncate_model_path(path: str, max_len: int = 50) -> str:
+    """Truncate a model path for display in suggestion hints.
+
+    If the path is shorter than max_len, return it as-is.
+    Otherwise show just the filename. If even the filename is too long,
+    truncate the middle of the full path with '...'.
+    """
+    if len(path) <= max_len:
+        return path
+    name = Path(path).name
+    if len(name) <= max_len:
+        return name
+    half = (max_len - 3) // 2
+    return path[:half] + "..." + path[-half:]
+
+
 @app.command()
 def detect():
     """Fingerprint hardware and detect llama.cpp backend."""
@@ -87,6 +103,13 @@ def tune(
     thorough: bool = typer.Option(
         False, "--thorough", help="Thorough mode (~25 trials, best results)"
     ),
+    json_out: str = typer.Option(
+        None, "--json-out",
+        help="Save tuning report as JSON (suppresses Rich output during tuning)",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", help="Suppress all console output (use with --json-out)"
+    ),
 ):
     """Find the fastest config for this GPU + model combo."""
     if not validate_model(model):
@@ -101,6 +124,49 @@ def tune(
         raise typer.Exit(1)
 
     mode = "thorough" if thorough else ("quick" if quick else "quick")
+
+    if json_out:
+        # Silence tuning console output
+        import llama_dyno.tune as tune_mod
+        orig_console = tune_mod.console
+        tune_mod.console = Console(quiet=True)
+        try:
+            result = run_tune(model, mode=mode)
+        finally:
+            tune_mod.console = orig_console
+
+        # Build report
+        hw = detect_hardware()
+        if result.trials:
+            med_pp, med_tg, var_pp, var_tg = run_bench_final(
+                model, result.winning_params, n_runs=3,
+            )
+            result.median_pp_tokens_s = med_pp
+            result.median_tg_tokens_s = med_tg
+            result.variance_pp = var_pp
+            result.variance_tg = var_tg
+
+        report_data = build_report(model, result, hardware=hw, dyno_version=DYNOVERSION)
+        save_report_json(report_data, json_out)
+
+        if not quiet:
+            console.print()
+            console.print("[bold green]✓ Tuning complete![/]")
+            wp = result.winning_params
+            console.print(Panel(
+                f"[bold]Winning Config:[/]\n"
+                f"  ngl={wp.ngl}, fa={'✓' if wp.flash_attn else '✗'}\n"
+                f"  ctk={wp.ct_k}, ctv={wp.ct_v}\n"
+                f"  batch={wp.batch_size}, ubatch={wp.ubatch_size}\n"
+                f"  threads={wp.threads or 'auto'}"
+                + (f"\n  fmoe={'✓' if wp.fmoe else '✗'}, rtr={'✓' if wp.rtr else '✗'}, amb={'✓' if wp.amb else '✗'}"
+                   if wp.fmoe or wp.rtr or wp.amb else ""),
+                title="🏆 Best Config",
+            ))
+            fa_flag = "--fa" if wp.flash_attn else "--no-fa"
+            console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(model)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
+        return
+
     result = run_tune(model, mode=mode)
 
     if result.trials:
@@ -124,7 +190,7 @@ def tune(
 
     # Suggest next step
     fa_flag = "--fa" if wp.flash_attn else "--no-fa"
-    console.print(f"\n[yellow]Next:[/] [bold]dyno bench {model} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
+    console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(model)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
 
 
 @app.command()
@@ -193,7 +259,7 @@ def bench(
         console.print()
         console.print(f"[green]✓[/] Generation: {med_tg:.1f} tok/s | Prompt: {med_pp:.1f} tok/s")
         console.print(f"  Config: ngl={ngl}, fa={flash_attn}, ctk={ctk}, ctv={ctv}, b={batch}, ub={ubatch}, t={threads}")
-        console.print(f"\n[yellow]Next:[/] [bold]dyno report {model}[/] to generate a shareable report")
+        console.print(f"\n[yellow]Next:[/] [bold]dyno report {_truncate_model_path(model)}[/] to generate a shareable report")
 
 
 @app.command()
@@ -204,6 +270,10 @@ def report(
     json_output: str = typer.Option(
         None, "--json", "-j", help="Save JSON report to path"
     ),
+    from_json: str = typer.Option(
+        None, "--from-json",
+        help="Load existing JSON report file instead of running hardware detection and tuning",
+    ),
     no_tune: bool = typer.Option(
         False, "--no-tune", help="Skip tuning, just detect + bench with defaults"
     ),
@@ -212,6 +282,37 @@ def report(
     ),
 ):
     """Generate a shareable report: JSON + markdown snippet + reproducible command."""
+    if from_json:
+        import json as json_mod
+        with open(from_json) as f:
+            report_data = json_mod.load(f)
+
+        console.print("[bold]Dyno Report Generator[/]")
+        console.print("  Loading from existing JSON report...")
+        console.print()
+        console.print("[bold]📋 Shareable Report[/]")
+        console.print()
+        console.print(format_markdown(report_data))
+        console.print()
+        console.print("[bold]📄 Full JSON[/]")
+        console.print()
+        console.print(format_json(report_data))
+        console.print()
+
+        # Save fresh copy
+        hw = report_data.get("hardware", {})
+        gpu_name = hw.get("gpu_name", "Unknown")
+        default_path = f"dyno-report-{gpu_name.replace(' ', '_')}-{Path(model).stem}.json"
+        save_report_json(report_data, default_path)
+        console.print(f"[green]✓[/] Report saved to: {default_path}")
+
+        if json_output:
+            path = save_report_json(report_data, json_output)
+            console.print(f"[green]✓[/] Report also saved to: {json_output}")
+
+        console.print(f"\n[yellow]Next:[/] [bold]dyno submit {_truncate_model_path(model)}[/] to share your results with the community")
+        return
+
     if not validate_model(model):
         console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
         raise typer.Exit(1)
@@ -267,7 +368,7 @@ def report(
     save_report_json(report_data, default_path)
     console.print(f"[green]✓[/] Report also saved to: {default_path}")
 
-    console.print(f"\n[yellow]Next:[/] [bold]dyno submit {model}[/] to share your results with the community")
+    console.print(f"\n[yellow]Next:[/] [bold]dyno submit {_truncate_model_path(model)}[/] to share your results with the community")
 
 
 @app.command()
