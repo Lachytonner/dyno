@@ -1,6 +1,6 @@
 # 🏎️ Dyno — llama.cpp Auto-Tuner & Benchmark
 
-**Dyno** is an open-source CLI that auto-tunes and benchmarks [llama.cpp](https://github.com/ggml-org/llama.cpp) / [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) inference on NVIDIA GPUs, producing reproducible, shareable results.
+**Dyno** is an open-source CLI that auto-tunes and benchmarks [llama.cpp](https://github.com/ggml-org/llama.cpp) / [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) inference on NVIDIA and Apple Silicon GPUs, producing reproducible, shareable results.
 
 ```bash
 pipx install llama-dyno
@@ -34,8 +34,8 @@ dyno report ~/Downloads/my-model.q4_k_m.gguf
 ## Prerequisites
 
 - **Python 3.11+**
-- **NVIDIA GPU** with drivers + CUDA
-- **llama-bench** binary from [llama.cpp](https://github.com/ggml-org/llama.cpp) or [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp)
+- **A GPU**: NVIDIA (drivers + CUDA) or Apple Silicon (M-series, uses Metal + unified memory)
+- **llama-bench** binary from [llama.cpp](https://github.com/ggml-org/llama.cpp) or [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) — built with the matching backend (CUDA or Metal)
 
 Install llama.cpp:
 
@@ -182,7 +182,7 @@ pytest
 
 - GUI
 - Multi-GPU
-- Non-NVIDIA backends (AMD, Intel, Apple Silicon)
+- AMD (ROCm) / Intel backends (planned)
 - Server hosting for results
 
 ## License
