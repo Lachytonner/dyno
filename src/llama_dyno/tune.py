@@ -132,6 +132,8 @@ def _coarse_sweep_ngl(
     is_ik: bool,
     pp_weight: float = 0.3,
     tg_weight: float = 0.7,
+    is_moe_metadata: bool = False,
+    ik_flags: dict | None = None,
 ) -> BenchParams | None:
     """Phase 1: Find max working ngl level and initial good params.
 
@@ -204,10 +206,13 @@ def _coarse_sweep_ngl(
                 pp=config.pp,
                 tg=config.tg,
             )
-            if is_ik:
-                params.fmoe = True
-                params.rtr = True
-                params.amb = True
+            if is_ik and is_moe_metadata:
+                if not ik_flags or ik_flags.get("fmoe", True):
+                    params.fmoe = True
+                if not ik_flags or ik_flags.get("rtr", True):
+                    params.rtr = True
+                if not ik_flags or ik_flags.get("amb", True):
+                    params.amb = True
 
             # Skip if trial with identical params already exists
             if any(t.params == params for t in trials):
@@ -253,6 +258,8 @@ def _hill_climb(
     is_ik: bool,
     pp_weight: float = 0.3,
     tg_weight: float = 0.7,
+    is_moe_metadata: bool = False,
+    ik_flags: dict | None = None,
 ) -> BenchParams:
     """Phase 2: Hill-climb on batch size and threads.
 
@@ -369,10 +376,14 @@ def _hill_climb(
                 best_params.threads = tc
                 improved = True
 
-    # If ik_llama.cpp, try moe/rtr/amb toggles
-    if is_ik and config.mode == "thorough":
-        for fmoe_val, rtr_val, amb_val in [(True, True, True), (True, True, False),
-                                            (True, False, True), (False, False, False)]:
+    # If ik_llama.cpp on an MoE model, try fmoe/rtr/amb toggles
+    if is_ik and is_moe_metadata:
+        if config.mode == "thorough":
+            ik_toggle_combos = [(True, True, True), (True, True, False),
+                                (True, False, True), (False, False, False)]
+        else:
+            ik_toggle_combos = [(True, True, True), (False, False, False)]
+        for fmoe_val, rtr_val, amb_val in ik_toggle_combos:
             if len(trials) >= config.max_trials:
                 break
             test_params = best_params.clone()
@@ -415,6 +426,8 @@ def run_tune(
     trials: list[TrialResult] | None = None,
     pp_weight: float = 0.3,
     tg_weight: float = 0.7,
+    is_ik: bool = False,
+    ik_flags: dict | None = None,
 ) -> TuneResult:
     """Run the full tuning pipeline on a model.
 
@@ -443,7 +456,7 @@ def run_tune(
         )
 
     # Determine backend
-    is_ik = "ik" in binary.lower()
+    is_ik = is_ik or ("ik" in binary.lower() if binary else False)
 
     # Extract model metadata
     metadata = extract_model_metadata(model_path)
@@ -457,6 +470,14 @@ def run_tune(
         # model_size is in bytes, convert to GiB for readability
         size_gib = metadata['model_size'] / (1024 ** 3)
         console.print(f"  Model size (llama-bench): {size_gib:.2f} GiB")
+    console.print()
+
+    # Determine MoE status from metadata
+    is_moe_metadata = metadata.get("is_moe", False)
+    if is_moe_metadata:
+        console.print("  Model type: MoE (enabling MoE-specific tuning)")
+    else:
+        console.print("  Model type: Dense (skipping MoE-specific tuning)")
     console.print()
 
     # Detect GPU VRAM
@@ -488,6 +509,16 @@ def run_tune(
     console.print(f"  Model size: {model_size_mib} MiB")
     console.print(f"  VRAM: {vram_total} MiB")
     console.print(f"  Backend: {'ik_llama.cpp' if is_ik else 'llama.cpp'}")
+    if is_ik and ik_flags:
+        parts = []
+        if ik_flags.get("fmoe"):
+            parts.append("fmoe=✓")
+        if ik_flags.get("rtr"):
+            parts.append("rtr=✓")
+        if ik_flags.get("amb"):
+            parts.append("amb=✓")
+        if parts:
+            console.print(f"  ik_llama.cpp extras: {' '.join(parts)}")
     console.print()
 
     # Phase 1: Coarse sweep
@@ -495,6 +526,7 @@ def run_tune(
     best_params = _coarse_sweep_ngl(
         model_path, vram_total, model_size_mib, binary, config, trials, is_ik,
         pp_weight=pp_weight, tg_weight=tg_weight,
+        is_moe_metadata=is_moe_metadata, ik_flags=ik_flags,
     )
 
     if best_params is None:
@@ -526,6 +558,7 @@ def run_tune(
             best_params = _hill_climb(
                 model_path, best_params, binary, config, trials, is_ik,
                 pp_weight=pp_weight, tg_weight=tg_weight,
+                is_moe_metadata=is_moe_metadata, ik_flags=ik_flags,
             )
     else:
         # Too few valid trials, still do hill climb

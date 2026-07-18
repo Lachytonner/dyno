@@ -153,18 +153,23 @@ def tune(
             raise typer.Exit(1)
         pp_weight, tg_weight = presets[optimize]
 
+    # Detect hardware to determine backend and ik flags
+    hw = detect_hardware()
+    is_ik = hw.backend == "ik_llama.cpp"
+    ik_flags = getattr(hw, "ik_features", None)
+
     if json_out:
         # Silence tuning console output
         import llama_dyno.tune as tune_mod
         orig_console = tune_mod.console
         tune_mod.console = Console(quiet=True)
         try:
-            result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight)
+            result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
+                              is_ik=is_ik, ik_flags=ik_flags)
         finally:
             tune_mod.console = orig_console
 
-        # Build report
-        hw = detect_hardware()
+        # Build report (hw already detected above)
         if result.trials:
             med_pp, med_tg, var_pp, var_tg = run_bench_final(
                 model, result.winning_params, n_runs=3,
@@ -195,7 +200,8 @@ def tune(
             console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(model)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
         return
 
-    result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight)
+    result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
+                      is_ik=is_ik, ik_flags=ik_flags)
 
     if result.trials:
         console.print()

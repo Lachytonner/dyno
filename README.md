@@ -46,6 +46,15 @@ git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp && cmake -B build && cmake --build build --config Release
 ```
 
+ik_llama.cpp (optional, for MoE models):
+
+```bash
+git clone https://github.com/ikawrakow/ik_llama.cpp
+cd ik_llama.cpp && cmake -B build && cmake --build build --config Release
+# Symlink the ik binaries
+ln -sf $(pwd)/build/bin/ik_llama-bench ~/.local/bin/
+```
+
 ## Commands
 
 ### `dyno detect`
@@ -66,6 +75,20 @@ Find the fastest config for your GPU + model.
 4. **ik_llama.cpp extras** — -fmoe, -rtr, -amb toggles (thorough only)
 
 OOM configs are discarded gracefully with ngl backoff. Live progress table shows every trial.
+
+## ik_llama.cpp Support
+
+Dyno automatically detects [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) 
+when `ik_llama-bench` is on your PATH. Extra flags tuned:
+
+| Flag | Description | Best for |
+|------|-------------|---------|
+| `-fmoe` | Fast MoE computation | MoE models (Mixtral, DeepSeek) |
+| `-rtr` | Runtime tensor reorder | Memory-bandwidth-bound scenarios |
+| `-amb` | Attention memory bound | Large context / many KV heads |
+
+Dyno detects which flags your build supports and only searches those.
+MoE models get fmoe enabled by default; Dense models skip MoE flags entirely.
 
 ### `dyno bench <model.gguf>`
 Run a specific config 3× and report median tokens/sec with variance.
@@ -112,6 +135,7 @@ Submit your results to the community results repo (`llama-dyno-results`):
 
 | GPU | Model | Quant | Backend | TG tok/s |
 |-----|-------|-------|---------|----------|
+| RTX 4090 | Mixtral-8x7B | Q4_K_M | ik_llama.cpp | 58.7 |
 | RTX 4090 | Llama-3-70B | Q4_K_M | ik_llama.cpp | 42.3 |
 | RTX 4090 | Llama-3-70B | Q4_K_M | llama.cpp | 35.1 |
 | RTX 3090 | Mistral-7B | Q4_K_M | llama.cpp | 112.8 |

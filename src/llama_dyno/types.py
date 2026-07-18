@@ -11,6 +11,14 @@ from typing import Any
 
 
 @dataclass
+class IkFeatures:
+    fmoe: bool = False      # Fast MoE support
+    rtr: bool = False       # Runtime tensor reorder support
+    amb: bool = False       # Attention memory bound support
+    detected: bool = False  # Whether ik_llama.cpp was detected at all
+
+
+@dataclass
 class HardwareFingerprint:
     gpu_name: str
     vram_total_mib: int
@@ -21,6 +29,7 @@ class HardwareFingerprint:
     ram_total_mib: int
     backend: str  # "llama.cpp" or "ik_llama.cpp"
     backend_commit: str | None = None
+    ik_features: IkFeatures | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -119,6 +128,7 @@ class ModelInfo:
     sha256: str
     quantization: str | None = None
     file_size_bytes: int | None = None
+    is_moe: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -356,6 +356,21 @@ def get_reproducible_command(model_path: str, params: BenchParams) -> str:
     return " ".join(cmd)
 
 
+def check_flag_supported(binary: str, flag: str) -> bool:
+    """Check if a flag is supported by the binary via its help output.
+
+    Returns True if the flag appears in the binary's help text.
+    """
+    try:
+        result = subprocess.run(
+            [binary, "-h"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return flag in (result.stdout + result.stderr)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 def extract_model_metadata(model_path: str) -> dict:
     """Extract model metadata from llama-bench output.
 
@@ -383,11 +398,26 @@ def extract_model_metadata(model_path: str) -> dict:
         else:
             return {}
 
+        # Detect MoE models
+        is_moe = False
+        model_type = entry.get("model_type", "") or ""
+        if "MoE" in str(model_type):
+            is_moe = True
+
+        # Heuristic: MoE models have more params per MiB of file size
+        model_size = entry.get("model_size")
+        model_n_params = entry.get("model_n_params")
+        if not is_moe and model_size and model_n_params:
+            size_mib = model_size / (1024.0 * 1024.0)
+            if size_mib > 0 and (model_n_params / size_mib) > 5_000_000:
+                is_moe = True
+
         return {
             "build_commit": entry.get("build_commit"),
-            "model_size": entry.get("model_size"),
-            "model_n_params": entry.get("model_n_params"),
-            "model_type": entry.get("model_type"),
+            "model_size": model_size,
+            "model_n_params": model_n_params,
+            "model_type": str(model_type) if model_type else None,
+            "is_moe": is_moe,
         }
     except (json.JSONDecodeError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return {}

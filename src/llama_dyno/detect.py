@@ -12,7 +12,7 @@ from pathlib import Path
 # Suppress pynvml deprecation warning from nvidia-ml-py
 warnings.filterwarnings("ignore", message="The pynvml package is deprecated")
 
-from .types import HardwareFingerprint
+from .types import HardwareFingerprint, IkFeatures
 
 # Optional psutil for RAM detection
 try:
@@ -196,6 +196,41 @@ def _get_commit_from_git(directory: str | None = None) -> str | None:
     return None
 
 
+def detect_ik_features(binary_path: str | None = None) -> IkFeatures:
+    """Detect which ik_llama.cpp feature flags the binary supports.
+
+    Probes the binary's help output to check for -fmoe, -rtr, -amb flags.
+    Returns IkFeatures with detected=True only if the binary name includes "ik_".
+    """
+    from .bench import find_bench_binary
+
+    if binary_path is None:
+        binary_path = find_bench_binary()
+    if binary_path is None:
+        return IkFeatures(detected=False)
+
+    binary_name = os.path.basename(binary_path)
+    if "ik_" not in binary_name:
+        return IkFeatures(detected=False)
+
+    # Probe via -h to see which flags are mentioned in the help text
+    try:
+        result = subprocess.run(
+            [binary_path, "-h"],
+            capture_output=True, text=True, timeout=5,
+        )
+        help_text = result.stdout + result.stderr
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return IkFeatures(detected=True)
+
+    return IkFeatures(
+        detected=True,
+        fmoe="-fmoe" in help_text,
+        rtr="-rtr" in help_text,
+        amb="-amb" in help_text,
+    )
+
+
 def detect_hardware() -> HardwareFingerprint:
     """Fingerprint the current hardware and detect llama.cpp backend."""
     gpu_name, vram, driver, cuda_ver = _detect_gpu()
@@ -224,6 +259,13 @@ def detect_hardware() -> HardwareFingerprint:
                 commit = os.environ[var]
                 break
 
+    # Detect ik_llama.cpp features if applicable
+    ik_features = None
+    if backend == "ik_llama.cpp" or (ik_bench and "ik_" in os.path.basename(ik_bench)):
+        probe_binary = ik_bench or llama_bench
+        if probe_binary:
+            ik_features = detect_ik_features(probe_binary)
+
     return HardwareFingerprint(
         gpu_name=gpu_name,
         vram_total_mib=vram,
@@ -234,4 +276,5 @@ def detect_hardware() -> HardwareFingerprint:
         ram_total_mib=ram,
         backend=backend,
         backend_commit=commit,
+        ik_features=ik_features,
     )
