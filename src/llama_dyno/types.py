@@ -86,6 +86,8 @@ class TrialResult:
     tg_token_ms: float | None = None # per-token tg time
     pp_tokens_s: float | None = None # tokens/sec pp
     tg_tokens_s: float | None = None # tokens/sec tg
+    pp_stddev: float | None = None   # stddev of prompt processing samples
+    tg_stddev: float | None = None   # stddev of generation samples
     oom: bool = False
     error: str | None = None
 

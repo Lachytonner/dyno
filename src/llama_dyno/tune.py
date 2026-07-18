@@ -11,7 +11,11 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from .bench import find_bench_binary, run_bench
+from .bench import (
+    extract_model_metadata,
+    find_bench_binary,
+    run_bench,
+)
 from .types import BenchParams, TrialResult, TuneResult
 
 console = Console()
@@ -24,6 +28,7 @@ class TuneConfig:
     pp: int = 512
     tg: int = 128
     timeout_per_trial: int = 300
+    convergence_threshold: float = 0.02  # 2% variance = converged (adaptive budget)
 
     @classmethod
     def quick(cls) -> TuneConfig:
@@ -34,13 +39,19 @@ class TuneConfig:
         return cls(mode="thorough", max_trials=25, timeout_per_trial=300)
 
 
-def _score_trial(t: TrialResult) -> float:
-    """Combined score: 30% pp throughput, 70% tg throughput."""
+def _score_trial(t: TrialResult, pp_weight: float = 0.3, tg_weight: float = 0.7) -> float:
+    """Combined score weighting pp and tg throughput.
+
+    Args:
+        t: Trial result.
+        pp_weight: Weight for prompt-processing throughput (default 0.3).
+        tg_weight: Weight for text-generation throughput (default 0.7).
+    """
     if t.oom or t.error:
         return -1.0
     pp = t.pp_tokens_s or 0
     tg = t.tg_tokens_s or 0
-    return pp * 0.3 + tg * 0.7
+    return pp * pp_weight + tg * tg_weight
 
 
 def build_progress_table(trials: list[TrialResult]) -> Table:
@@ -54,6 +65,7 @@ def build_progress_table(trials: list[TrialResult]) -> Table:
     table.add_column("threads", justify="right")
     table.add_column("pp t/s", justify="right")
     table.add_column("tg t/s", justify="right")
+    table.add_column("±", justify="right")
     table.add_column("score", justify="right")
     table.add_column("status", justify="center")
 
@@ -67,6 +79,17 @@ def build_progress_table(trials: list[TrialResult]) -> Table:
         else:
             status = "[green]OK[/]"
 
+        # Calculate stability indicator: larger of pp_stddev/tg_stddev
+        if t.pp_stddev is not None and t.tg_stddev is not None:
+            stability = max(t.pp_stddev, t.tg_stddev)
+        elif t.tg_stddev is not None:
+            stability = t.tg_stddev
+        elif t.pp_stddev is not None:
+            stability = t.pp_stddev
+        else:
+            stability = None
+        stability_str = f"±{stability:.1f}" if stability is not None else "-"
+
         table.add_row(
             str(i),
             str(p.ngl),
@@ -76,6 +99,7 @@ def build_progress_table(trials: list[TrialResult]) -> Table:
             str(p.threads) if p.threads > 0 else "auto",
             f"{t.pp_tokens_s:.1f}" if t.pp_tokens_s else "-",
             f"{t.tg_tokens_s:.1f}" if t.tg_tokens_s else "-",
+            stability_str,
             f"{score:.1f}" if score >= 0 else "-",
             status,
         )
@@ -106,6 +130,8 @@ def _coarse_sweep_ngl(
     config: TuneConfig,
     trials: list[TrialResult],
     is_ik: bool,
+    pp_weight: float = 0.3,
+    tg_weight: float = 0.7,
 ) -> BenchParams | None:
     """Phase 1: Find max working ngl level and initial good params.
 
@@ -153,42 +179,67 @@ def _coarse_sweep_ngl(
     if config.mode == "quick":
         param_combos = param_combos[:5]
 
-    for ngl_val, fa_val, kv_q in param_combos:
+    # Track best per-ngl for pruning
+    ngl_best_scores: dict[int, float] = {}
+    previous_ngl: int | None = None
+
+    # Iterate grouped by ngl value for pruning
+    for ngl_val in ngl_values:
         if len(trials) >= config.max_trials:
             break
 
-        params = BenchParams(
-            ngl=ngl_val,
-            flash_attn=fa_val,
-            ct_k=kv_q,
-            ct_v=kv_q,
-            pp=config.pp,
-            tg=config.tg,
-        )
-        if is_ik:
-            params.fmoe = True
-            params.rtr = True
-            params.amb = True
+        # Get combos for this ngl value
+        combos_for_ngl = [(n, f, k) for n, f, k in param_combos if n == ngl_val]
+        best_score_for_ngl = -1.0
 
-        # Skip if trial with identical params already exists
-        if any(t.params == params for t in trials):
-            continue
+        for _, fa_val, kv_q in combos_for_ngl:
+            if len(trials) >= config.max_trials:
+                break
 
-        result = _run_trial(model_path, params, binary, config)
-        trials.append(result)
+            params = BenchParams(
+                ngl=ngl_val,
+                flash_attn=fa_val,
+                ct_k=kv_q,
+                ct_v=kv_q,
+                pp=config.pp,
+                tg=config.tg,
+            )
+            if is_ik:
+                params.fmoe = True
+                params.rtr = True
+                params.amb = True
 
-        console.clear()
-        console.print(build_progress_table(trials))
+            # Skip if trial with identical params already exists
+            if any(t.params == params for t in trials):
+                continue
 
-        score = _score_trial(result)
-        if score > best_score:
-            best_score = score
-            best_params = params.clone()
+            result = _run_trial(model_path, params, binary, config)
+            trials.append(result)
 
-        # If full offload OOM'd, reduce further ngl attempts
-        if result.oom and ngl_val == 99 and vram_ratio > 1.5:
-            # Try less aggressive next
-            pass
+            console.clear()
+            console.print(build_progress_table(trials))
+
+            score = _score_trial(result, pp_weight, tg_weight)
+            if score > best_score_for_ngl:
+                best_score_for_ngl = score
+            if score > best_score:
+                best_score = score
+                best_params = params.clone()
+
+        ngl_best_scores[ngl_val] = best_score_for_ngl
+
+        # Pruning: if current ngl's best score is significantly worse than previous,
+        # or significantly better (suggesting we've passed the sweet spot), skip remaining
+        if previous_ngl is not None and best_score_for_ngl > 0 and ngl_best_scores.get(previous_ngl, 0) > 0:
+            ratio = best_score_for_ngl / ngl_best_scores[previous_ngl]
+            if ratio < 0.8:
+                console.print(f"[dim]Pruning: ngl={ngl_val} score {ratio:.0%} of ngl={previous_ngl}, skipping remaining ngl values[/]")
+                break
+            if ratio > 1.2:
+                console.print(f"[dim]Pruning: ngl={ngl_val} score {ratio:.0%} of ngl={previous_ngl}, skipping lower ngl values (sweet spot passed)[/]")
+                break
+
+        previous_ngl = ngl_val
 
     return best_params
 
@@ -200,6 +251,8 @@ def _hill_climb(
     config: TuneConfig,
     trials: list[TrialResult],
     is_ik: bool,
+    pp_weight: float = 0.3,
+    tg_weight: float = 0.7,
 ) -> BenchParams:
     """Phase 2: Hill-climb on batch size and threads.
 
@@ -210,7 +263,7 @@ def _hill_climb(
         base_params = BenchParams(pp=config.pp, tg=config.tg)
 
     best_params = base_params.clone()
-    best_score = _score_trial(trials[-1]) if trials else -1.0
+    best_score = _score_trial(trials[-1], pp_weight, tg_weight) if trials else -1.0
 
     # Batch size search space
     if config.mode == "quick":
@@ -229,6 +282,7 @@ def _hill_climb(
     # Hill climb on batch first
     best_batch = best_params.batch_size
     improved = True
+    stale_trials = 0
     while improved and len(trials) < config.max_trials:
         improved = False
         for bs in batch_sizes:
@@ -248,7 +302,18 @@ def _hill_climb(
             console.clear()
             console.print(build_progress_table(trials))
 
-            score = _score_trial(result)
+            score = _score_trial(result, pp_weight, tg_weight)
+
+            # Plateau: if score hasn't improved by >1% over best, count stale
+            if score <= best_score * 1.01:
+                stale_trials += 1
+            else:
+                stale_trials = 0
+
+            if stale_trials >= 3:
+                console.print(f"[dim]Batch plateau: {stale_trials} trials without >1% improvement, stopping batch search[/]")
+                break
+
             if score > best_score:
                 best_score = score
                 best_params.batch_size = bs
@@ -258,6 +323,8 @@ def _hill_climb(
 
     # Hill climb on threads
     improved = True
+    stale_trials = 0
+    auto_score: float | None = None
     while improved and len(trials) < config.max_trials:
         improved = False
         for tc in thread_counts:
@@ -276,7 +343,27 @@ def _hill_climb(
             console.clear()
             console.print(build_progress_table(trials))
 
-            score = _score_trial(result)
+            score = _score_trial(result, pp_weight, tg_weight)
+
+            # Track auto-score for thread pruning
+            if tc == 0:
+                auto_score = score
+
+            # Pruning: if manual thread count gives worse result than auto, skip remaining
+            if tc != 0 and auto_score is not None and score < auto_score:
+                console.print(f"[dim]Thread pruning: tc={tc} ({score:.1f}) < auto ({auto_score:.1f}), skipping remaining thread counts[/]")
+                break
+
+            # Plateau: if score hasn't improved by >1% over best, count stale
+            if score <= best_score * 1.01:
+                stale_trials += 1
+            else:
+                stale_trials = 0
+
+            if stale_trials >= 3:
+                console.print(f"[dim]Thread plateau: {stale_trials} trials without >1% improvement, stopping thread search[/]")
+                break
+
             if score > best_score:
                 best_score = score
                 best_params.threads = tc
@@ -303,7 +390,7 @@ def _hill_climb(
             console.clear()
             console.print(build_progress_table(trials))
 
-            score = _score_trial(result)
+            score = _score_trial(result, pp_weight, tg_weight)
             if score > best_score:
                 best_score = score
                 best_params.fmoe = fmoe_val
@@ -326,6 +413,8 @@ def run_tune(
     model_path: str,
     mode: str = "quick",
     trials: list[TrialResult] | None = None,
+    pp_weight: float = 0.3,
+    tg_weight: float = 0.7,
 ) -> TuneResult:
     """Run the full tuning pipeline on a model.
 
@@ -333,6 +422,8 @@ def run_tune(
         model_path: Path to .gguf file.
         mode: "quick" (~10 trials) or "thorough" (~25 trials).
         trials: Optional list to collect results (for testing).
+        pp_weight: Weight for prompt-processing throughput (default 0.3).
+        tg_weight: Weight for text-generation throughput (default 0.7).
 
     Returns:
         TuneResult with winning params and full trial list.
@@ -353,6 +444,20 @@ def run_tune(
 
     # Determine backend
     is_ik = "ik" in binary.lower()
+
+    # Extract model metadata
+    metadata = extract_model_metadata(model_path)
+    if metadata.get("build_commit"):
+        console.print(f"  Build commit: {metadata['build_commit']}")
+    if metadata.get("model_n_params"):
+        console.print(f"  Model params: {metadata['model_n_params']}")
+    if metadata.get("model_type"):
+        console.print(f"  Model type: {metadata['model_type']}")
+    if metadata.get("model_size"):
+        # model_size is in bytes, convert to GiB for readability
+        size_gib = metadata['model_size'] / (1024 ** 3)
+        console.print(f"  Model size (llama-bench): {size_gib:.2f} GiB")
+    console.print()
 
     # Detect GPU VRAM
     vram_total = 0
@@ -388,7 +493,8 @@ def run_tune(
     # Phase 1: Coarse sweep
     console.print("[bold]Phase 1:[/] Coarse sweep (ngl, flash attention, KV cache)...")
     best_params = _coarse_sweep_ngl(
-        model_path, vram_total, model_size_mib, binary, config, trials, is_ik
+        model_path, vram_total, model_size_mib, binary, config, trials, is_ik,
+        pp_weight=pp_weight, tg_weight=tg_weight,
     )
 
     if best_params is None:
@@ -397,20 +503,42 @@ def run_tune(
         best_params = BenchParams(ngl=0, flash_attn=False, pp=config.pp, tg=config.tg)
         result = _run_trial(model_path, best_params, binary, config)
         trials.append(result)
-        score = _score_trial(result)
+        score = _score_trial(result, pp_weight, tg_weight)
         if score < 0:
             return TuneResult(winning_params=best_params, trials=trials)
 
-    # Phase 2: Hill climb
-    console.print("[bold]Phase 2:[/] Hill climb (batch size, threads)...")
-    best_params = _hill_climb(
-        model_path, best_params, binary, config, trials, is_ik
-    )
+    # Adaptive budget: check for early convergence after Phase 1
+    valid_scores = [
+        _score_trial(t, pp_weight, tg_weight)
+        for t in trials if not t.oom and not t.error
+    ]
+    valid_scores.sort(reverse=True)
+    top3 = valid_scores[:3]
+    if len(top3) >= 2:
+        max_s = max(top3)
+        min_s = min(top3)
+        if max_s > 0 and (max_s - min_s) / max_s <= config.convergence_threshold:
+            console.print("[yellow]Config converged early — scores within threshold, skipping hill climb[/]")
+            # Skip Phase 2 entirely, go to final scoring
+        else:
+            # Phase 2: Hill climb
+            console.print("[bold]Phase 2:[/] Hill climb (batch size, threads)...")
+            best_params = _hill_climb(
+                model_path, best_params, binary, config, trials, is_ik,
+                pp_weight=pp_weight, tg_weight=tg_weight,
+            )
+    else:
+        # Too few valid trials, still do hill climb
+        console.print("[bold]Phase 2:[/] Hill climb (batch size, threads)...")
+        best_params = _hill_climb(
+            model_path, best_params, binary, config, trials, is_ik,
+            pp_weight=pp_weight, tg_weight=tg_weight,
+        )
 
     # Find best trial
     best_score = -1.0
     for t in trials:
-        s = _score_trial(t)
+        s = _score_trial(t, pp_weight, tg_weight)
         if s > best_score:
             best_score = s
             best_params = t.params.clone()

@@ -110,6 +110,21 @@ def tune(
     quiet: bool = typer.Option(
         False, "--quiet", help="Suppress all console output (use with --json-out)"
     ),
+    pp_weight: float = typer.Option(
+        0.3, "--pp-weight",
+        min=0.0, max=1.0,
+        help="Weight for prompt-processing throughput in scoring (0.0-1.0)",
+    ),
+    tg_weight: float = typer.Option(
+        0.7, "--tg-weight",
+        min=0.0, max=1.0,
+        help="Weight for text-generation throughput in scoring (0.0-1.0)",
+    ),
+    optimize: str = typer.Option(
+        None, "--optimize",
+        help="Optimization preset (overrides --pp-weight/--tg-weight): "
+             "balanced (0.3/0.7), generation (0.1/0.9), prompt (0.7/0.3), interactive (0.5/0.5)",
+    ),
 ):
     """Find the fastest config for this GPU + model combo."""
     if not validate_model(model):
@@ -125,13 +140,26 @@ def tune(
 
     mode = "thorough" if thorough else ("quick" if quick else "quick")
 
+    # Resolve optimize preset (overrides individual weights)
+    if optimize is not None:
+        presets = {
+            "balanced": (0.3, 0.7),
+            "generation": (0.1, 0.9),
+            "prompt": (0.7, 0.3),
+            "interactive": (0.5, 0.5),
+        }
+        if optimize not in presets:
+            console.print(f"[red]ERROR:[/] Unknown --optimize value '{optimize}'. Choose from: {', '.join(presets)}")
+            raise typer.Exit(1)
+        pp_weight, tg_weight = presets[optimize]
+
     if json_out:
         # Silence tuning console output
         import llama_dyno.tune as tune_mod
         orig_console = tune_mod.console
         tune_mod.console = Console(quiet=True)
         try:
-            result = run_tune(model, mode=mode)
+            result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight)
         finally:
             tune_mod.console = orig_console
 
@@ -167,7 +195,7 @@ def tune(
             console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(model)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
         return
 
-    result = run_tune(model, mode=mode)
+    result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight)
 
     if result.trials:
         console.print()

@@ -144,6 +144,30 @@ def _extract_from_results(data: list[dict]) -> tuple[float | None, float | None]
     return pp, tg
 
 
+def _extract_stddev_from_results(data: list[dict]) -> tuple[float | None, float | None]:
+    """Extract pp and tg stddev (token/s) from parsed bench results.
+
+    llama-bench JSON outputs stddev_ts per entry:
+    - Entry with n_prompt>0, n_gen=0 → prompt processing stddev
+    - Entry with n_prompt=0, n_gen>0 → text generation stddev
+    """
+    pp_stddev = None
+    tg_stddev = None
+
+    for entry in data:
+        n_prompt = entry.get("n_prompt", 0)
+        n_gen = entry.get("n_gen", 0)
+        stddev_ts = entry.get("stddev_ts")
+
+        if stddev_ts is not None:
+            if n_prompt > 0 and n_gen == 0:
+                pp_stddev = stddev_ts
+            elif n_gen > 0 and n_prompt == 0:
+                tg_stddev = stddev_ts
+
+    return pp_stddev, tg_stddev
+
+
 def _extract_timing_from_table(text: str) -> tuple[float | None, float | None]:
     """Fallback: extract tokens/s from the table output by parsing the pp/tg columns."""
     pp = None
@@ -176,6 +200,7 @@ def run_bench(
     params: BenchParams | None = None,
     binary: str | None = None,
     timeout: int = 300,
+    warmup: bool = True,
 ) -> TrialResult:
     """Run a single llama-bench trial with the given parameters.
 
@@ -196,6 +221,38 @@ def run_bench(
                 "Or build from source: https://github.com/ggml-org/llama.cpp"
             ),
         )
+
+    # Warmup run: short trial to warm up GPU clocks/CUDA kernels
+    if warmup:
+        warmup_params = params.clone()
+        warmup_params.pp = 16
+        warmup_params.tg = 16
+        warmup_cmd = [binary, "-m", model_path, "-o", "json"] + warmup_params.to_flag_list()
+        try:
+            warmup_result = subprocess.run(
+                warmup_cmd, capture_output=True, text=True, timeout=min(timeout, 60),
+            )
+            if warmup_result.returncode != 0:
+                # Check for OOM - return warmup result as main result if OOM
+                oom_keywords = [
+                    "CUDA error", "out of memory", "OOM", "cudaMalloc failed",
+                    "failed to allocate", "Not enough memory", "signal 9",
+                    "Killed", "terminate called after throwing",
+                ]
+                is_warmup_oom = warmup_result.returncode != 0 and any(
+                    kw.lower() in (warmup_result.stdout + warmup_result.stderr).lower()
+                    for kw in oom_keywords
+                )
+                if is_warmup_oom:
+                    return TrialResult(
+                        params=params,
+                        oom=True,
+                        error="Warmup failed (OOM): " + warmup_result.stderr[:200],
+                    )
+                # Non-OOM warmup failure: continue to real trial
+        except (subprocess.TimeoutExpired, OSError):
+            # Warmup failed non-critically; continue to real trial
+            pass
 
     cmd = [binary, "-m", model_path, "-o", "json"] + params.to_flag_list()
 
@@ -257,10 +314,14 @@ def run_bench(
     output = result.stdout
     data = _parse_bench_output(output)
     pp_ts, tg_ts = _extract_from_results(data)
+    pp_stddev, tg_stddev = _extract_stddev_from_results(data)
 
     # Fallback: try extracting from raw output
     if pp_ts is None or tg_ts is None:
         pp_ts, tg_ts = _extract_timing_from_table(output)
+        # Stddev not available from table fallback
+        pp_stddev = None
+        tg_stddev = None
 
     # Also try scanning for "token/s" anywhere in output
     if pp_ts is None or tg_ts is None:
@@ -273,11 +334,16 @@ def run_bench(
                 tg_ts = float(m.group(1))
             if pp_ts is not None and tg_ts is not None:
                 break
+        # Stddev not available from regex fallback
+        pp_stddev = None
+        tg_stddev = None
 
     return TrialResult(
         params=params,
         pp_tokens_s=pp_ts,
         tg_tokens_s=tg_ts,
+        pp_stddev=pp_stddev,
+        tg_stddev=tg_stddev,
         oom=False,
     )
 
@@ -288,3 +354,40 @@ def get_reproducible_command(model_path: str, params: BenchParams) -> str:
     flags = params.to_flag_list()
     cmd = [binary, "-m", model_path] + flags
     return " ".join(cmd)
+
+
+def extract_model_metadata(model_path: str) -> dict:
+    """Extract model metadata from llama-bench output.
+
+    Runs a fast single-token bench to extract model metadata
+    like model_size, model_n_params, build_commit, and model_type.
+    Returns empty dict on failure.
+    """
+    binary = find_bench_binary()
+    if binary is None:
+        return {}
+
+    try:
+        result = subprocess.run(
+            [binary, "-m", model_path, "-p", "1", "-n", "1", "-ngl", "0", "-o", "json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return {}
+
+        data = json.loads(result.stdout)
+        if isinstance(data, list) and len(data) > 0:
+            entry = data[0]
+        elif isinstance(data, dict):
+            entry = data
+        else:
+            return {}
+
+        return {
+            "build_commit": entry.get("build_commit"),
+            "model_size": entry.get("model_size"),
+            "model_n_params": entry.get("model_n_params"),
+            "model_type": entry.get("model_type"),
+        }
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {}
