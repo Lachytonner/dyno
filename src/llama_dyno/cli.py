@@ -14,6 +14,11 @@ from rich.table import Table
 from . import __version__ as DYNOVERSION
 from .bench import find_bench_binary, find_server_binary, validate_model
 from .detect import detect_hardware
+from .lmstudio import (
+    list_lmstudio_models,
+    lmstudio_available,
+    lmstudio_runner,
+)
 from .ollama import (
     list_ollama_models,
     ollama_available,
@@ -94,6 +99,22 @@ def _ollama_check(host: str, model: str) -> None:
         for m in models:
             console.print(f"  - {m}")
         console.print("\nPull it: [bold]ollama pull {model}[/]".format(model=model))
+        raise typer.Exit(1)
+
+
+def _lmstudio_check(host: str, model: str) -> None:
+    """Verify LM Studio server is reachable and the model is loaded."""
+    if not lmstudio_available(host):
+        console.print(f"[red]ERROR:[/] LM Studio server not reachable at {host}.")
+        console.print("  Start LM Studio and enable the local API server.")
+        console.print("  See: https://lmstudio.ai/docs/api")
+        raise typer.Exit(1)
+    models = list_lmstudio_models(host)
+    if model not in models:
+        console.print(f"[red]ERROR:[/] Model '{model}' not found in LM Studio. Available models:")
+        for m in models:
+            console.print(f"  - {m}")
+        console.print("\nLoad it: [bold]lms load {model}[/]".format(model=model))
         raise typer.Exit(1)
 
 
@@ -220,6 +241,16 @@ def doctor(
     else:
         console.print(_check_mark(False, "Ollama not detected (is the server running?)"))
 
+    # 8. LM Studio check
+    total += 1
+    lmstudio_ok = lmstudio_available()
+    if lmstudio_ok:
+        models = list_lmstudio_models()
+        console.print(_check_mark(True, f"LM Studio running ({len(models)} model{'s' if len(models) != 1 else ''})"))
+        passed += 1
+    else:
+        console.print(_check_mark(False, "LM Studio not detected (is the server running?)"))
+
     # Summary
     console.print()
     if passed == total:
@@ -283,6 +314,14 @@ def detect():
     else:
         status.add_row("Ollama", "✗ Not detected")
 
+    # LM Studio presence
+    lmstudio_ok = lmstudio_available()
+    if lmstudio_ok:
+        models = list_lmstudio_models()
+        status.add_row("LM Studio", f"✓ [dim]running ({len(models)} model{'s' if len(models) != 1 else ''})[/]")
+    else:
+        status.add_row("LM Studio", "✗ Not detected")
+
     console.print()
     console.print(status)
 
@@ -301,9 +340,12 @@ def tune(
     ollama: bool = typer.Option(
         False, "--ollama", help="Benchmark an Ollama model instead of a .gguf file"
     ),
+    lmstudio: bool = typer.Option(
+        False, "--lmstudio", help="Benchmark an LM Studio model instead of a .gguf file"
+    ),
     host: str = typer.Option(
         "http://localhost:11434", "--host",
-        help="Ollama server URL (default: http://localhost:11434)",
+        help="Server URL (Ollama: http://localhost:11434, LM Studio: http://localhost:1234/v1)",
     ),
     json_out: str = typer.Option(
         None, "--json-out",
@@ -353,6 +395,13 @@ def tune(
             return ollama_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
 
         tune_kw = dict(runner=_ollama_wrapper, sweep_fa=False, sweep_kv=False)
+    elif lmstudio:
+        _lmstudio_check(host, model)
+
+        def _lmstudio_wrapper(m, params=None, binary=None, timeout=300, warmup=True, **kw):
+            return lmstudio_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
+
+        tune_kw = dict(runner=_lmstudio_wrapper, sweep_fa=False, sweep_kv=False)
     else:
         if not validate_model(model):
             console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
@@ -388,6 +437,12 @@ def tune(
                 tg_vals = [r.tg_tokens_s for r in r_results if r.tg_tokens_s is not None]
                 result.median_pp_tokens_s = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
                 result.median_tg_tokens_s = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
+            elif lmstudio:
+                r_results = [lmstudio_runner(model, params=result.winning_params) for _ in range(3)]
+                pp_vals = [r.pp_tokens_s for r in r_results if r.pp_tokens_s is not None]
+                tg_vals = [r.tg_tokens_s for r in r_results if r.tg_tokens_s is not None]
+                result.median_pp_tokens_s = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
+                result.median_tg_tokens_s = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
             else:
                 med_pp, med_tg, var_pp, var_tg = run_bench_final(
                     model, result.winning_params, n_runs=3,
@@ -397,8 +452,9 @@ def tune(
                 result.variance_pp = var_pp
                 result.variance_tg = var_tg
 
+        backend = "ollama" if ollama else ("lmstudio" if lmstudio else None)
         report_data = build_report(model, result, hardware=hw, dyno_version=DYNOVERSION,
-                                    backend="ollama" if ollama else None)
+                                    backend=backend)
         save_report_json(report_data, json_out)
 
         if not quiet:
@@ -465,14 +521,19 @@ def bench(
     ollama: bool = typer.Option(
         False, "--ollama", help="Benchmark an Ollama model instead of a .gguf file"
     ),
+    lmstudio: bool = typer.Option(
+        False, "--lmstudio", help="Benchmark an LM Studio model instead of a .gguf file"
+    ),
     host: str = typer.Option(
         "http://localhost:11434", "--host",
-        help="Ollama server URL (default: http://localhost:11434)",
+        help="Server URL (Ollama: http://localhost:11434, LM Studio: http://localhost:1234/v1)",
     ),
 ):
     """Run the winning config 3x, report median with variance."""
     if ollama:
         _ollama_check(host, model)
+    elif lmstudio:
+        _lmstudio_check(host, model)
     else:
         if not validate_model(model):
             console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
@@ -502,6 +563,14 @@ def bench(
 
     if ollama:
         results = [ollama_runner(model, params=params) for _ in range(runs)]
+        pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
+        tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
+        med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
+        med_tg = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
+        var_pp = 0.0
+        var_tg = 0.0
+    elif lmstudio:
+        results = [lmstudio_runner(model, params=params) for _ in range(runs)]
         pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
         tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
         med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0

@@ -8,6 +8,7 @@ pipx install llama-dyno
 dyno detect
 dyno tune ~/models/mistral-7b.Q4_K_M.gguf --quick
 dyno bench ~/models/mistral-7b.Q4_K_M.gguf --ngl 99 --fa
+dyno bench --lmstudio llama-3.2-3b  # benchmark an LM Studio model
 dyno report ~/models/mistral-7b.Q4_K_M.gguf
 dyno submit ~/models/mistral-7b.Q4_K_M.gguf
 ```
@@ -90,6 +91,31 @@ when `ik_llama-bench` is on your PATH. Extra flags tuned:
 Dyno detects which flags your build supports and only searches those.
 MoE models get fmoe enabled by default; Dense models skip MoE flags entirely.
 
+## LM Studio Support
+
+Dyno can benchmark models served by [LM Studio](https://lmstudio.ai/) through its
+OpenAI-compatible API (`http://localhost:1234/v1`).
+
+```bash
+# Show LM Studio status in hardware detection
+dyno detect
+
+# Benchmark a loaded model
+dyno bench --lmstudio llama-3.2-3b
+
+# Tune and create a report
+dyno tune --lmstudio llama-3.2-3b --json-out report.json
+```
+
+LM Studio does not expose engine-reported tok/s — throughput is measured
+**client-side** from the streamed SSE response (wall-clock). Results are
+approximate and may vary with system load.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--lmstudio` | | Benchmark an LM Studio model |
+| `--host` | `http://localhost:1234/v1` | LM Studio API base URL |
+
 ### `dyno bench <model.gguf>`
 Run a specific config 3× and report median tokens/sec with variance.
 
@@ -165,6 +191,8 @@ src/llama_dyno/
 ├── detect.py      # Hardware fingerprinting (pynvml, nvidia-smi, /proc)
 ├── bench.py       # llama-bench subprocess driver + parser
 ├── tune.py        # Search strategy (coarse sweep + hill climb)
+├── ollama.py      # Ollama REST API runner
+├── lmstudio.py    # LM Studio OpenAI-compatible API runner
 ├── report.py      # Report generation (JSON + markdown)
 └── submit.py      # GitHub PR / Gist submission
 ```

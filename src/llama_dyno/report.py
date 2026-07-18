@@ -7,6 +7,7 @@ from typing import Any
 
 from .bench import get_reproducible_command
 from .detect import detect_hardware
+from .lmstudio import lmstudio_reproducible_command
 from .ollama import ollama_reproducible_command
 from .types import (
     HardwareFingerprint,
@@ -42,6 +43,11 @@ def build_report(
             model_path, tune_result.winning_params
         )
         report["hardware"]["backend"] = "ollama"
+    elif backend == "lmstudio":
+        report["reproducible_command"] = lmstudio_reproducible_command(
+            model_path, tune_result.winning_params
+        )
+        report["hardware"]["backend"] = "lmstudio"
     else:
         report["reproducible_command"] = get_reproducible_command(
             model_path, tune_result.winning_params

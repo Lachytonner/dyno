@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llama-dyno"
-version = "1.4.0"
+version = "1.5.0"
 description = "Auto-tune and benchmark llama.cpp / ik_llama.cpp inference on NVIDIA, AMD (ROCm), and Apple Silicon GPUs"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 authors = [
   { name = "Flowdesk Systems", email = "lachy@flowdesk.systems" },
 ]
-keywords = ["llama.cpp", "ollama", "benchmark", "tuning", "gpu", "nvidia", "amd", "rocm", "apple-silicon", "metal", "inference"]
+keywords = ["llama.cpp", "ollama", "lm-studio", "benchmark", "tuning", "gpu", "nvidia", "amd", "rocm", "apple-silicon", "metal", "inference"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
