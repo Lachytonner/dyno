@@ -130,6 +130,10 @@ class ModelInfo:
     file_size_bytes: int | None = None
     is_moe: bool = False
 
+    @property
+    def short_hash(self) -> str:
+        return self.sha256[:12] if self.sha256 else "unknown"
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

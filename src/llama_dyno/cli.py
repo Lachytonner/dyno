@@ -414,7 +414,7 @@ def submit(
         False, "--quick", help="Quick tune mode before submission"
     ),
 ):
-    """Submit results — opens a PR or creates a Gist."""
+    """Submit results — creates a Gist with your benchmark."""
     if not validate_model(model):
         console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
         raise typer.Exit(1)
@@ -451,6 +451,246 @@ def submit(
     except RuntimeError as e:
         console.print(f"[red]{e}[/]")
         raise typer.Exit(1)
+
+
+@app.command()
+def search(
+    gpu: str = typer.Argument(
+        "", help="GPU name or keyword to search for (e.g. 'RTX 4070')"
+    ),
+    model: str = typer.Argument(
+        "", help="Model name or keyword to search for (e.g. 'gemma')"
+    ),
+    local_dir: str = typer.Option(
+        "dyno-results", "--dir", "-d",
+        help="Directory of local result JSON files to search",
+    ),
+):
+    """Search local result JSON files for matching GPU and/or model keywords."""
+    import json as json_mod
+
+    search_dir = Path(local_dir)
+    if not search_dir.is_dir():
+        console.print(f"[yellow]Warning:[/] Directory '{local_dir}' not found.")
+        return
+
+    results: list[dict[str, str]] = []
+    for json_path in sorted(search_dir.glob("*.json")):
+        try:
+            with open(json_path) as f:
+                data = json_mod.load(f)
+        except (json_mod.JSONDecodeError, OSError) as e:
+            console.print(f"[yellow]Warning:[/] Skipping '{json_path.name}': {e}")
+            continue
+
+        # Check it looks like a dyno report (has hardware/model keys)
+        hw = data.get("hardware", {})
+        model_info = data.get("model", {})
+
+        gpu_name = hw.get("gpu_name", "") or ""
+        model_name = model_info.get("name", "") or ""
+
+        # Apply filters (case-insensitive substring match)
+        if gpu and gpu.lower() not in gpu_name.lower():
+            continue
+        if model and model.lower() not in model_name.lower():
+            continue
+
+        # Extract display fields
+        wp = data.get("winning_params", {})
+        results_data = data.get("results", {})
+        quant = model_info.get("quantization") or "N/A"
+        backend = hw.get("backend", "N/A")
+        tg = results_data.get("median_tg_tokens_per_sec")
+        pp = results_data.get("median_pp_tokens_per_sec")
+
+        tg_str = f"{tg:.1f}" if tg is not None else "N/A"
+        pp_str = f"{pp:.1f}" if pp is not None else "N/A"
+
+        results.append({
+            "gpu": gpu_name,
+            "model": model_name,
+            "quant": quant,
+            "backend": backend,
+            "tg": tg_str,
+            "pp": pp_str,
+            "file": json_path.name,
+        })
+
+    if not results:
+        console.print(f"No matching results found in '{local_dir}'.")
+        return
+
+    table = Table(title=f"Search Results ({len(results)} found)")
+    table.add_column("GPU", style="bold cyan")
+    table.add_column("Model")
+    table.add_column("Quant")
+    table.add_column("Backend")
+    table.add_column("TG tok/s", justify="right")
+    table.add_column("PP tok/s", justify="right")
+    table.add_column("File")
+
+    for r in results:
+        table.add_row(
+            r["gpu"], r["model"], r["quant"], r["backend"],
+            r["tg"], r["pp"], r["file"],
+        )
+
+    console.print(table)
+    console.print(f"[green]Found {len(results)} matching results.[/]")
+
+
+@app.command()
+def compare(
+    result1: str = typer.Argument(
+        ..., help="First result JSON file", exists=True
+    ),
+    result2: str = typer.Argument(
+        ..., help="Second result JSON file", exists=True
+    ),
+):
+    """Compare two result JSON files side-by-side."""
+    import json as json_mod
+
+    def load_result(path: str) -> dict:
+        with open(path) as f:
+            return json_mod.load(f)
+
+    try:
+        r1 = load_result(result1)
+    except (json_mod.JSONDecodeError, OSError) as e:
+        console.print(f"[red]Error:[/] Could not load '{result1}': {e}")
+        raise typer.Exit(1)
+
+    try:
+        r2 = load_result(result2)
+    except (json_mod.JSONDecodeError, OSError) as e:
+        console.print(f"[red]Error:[/] Could not load '{result2}': {e}")
+        raise typer.Exit(1)
+
+    def _g(d: dict, *keys: str, default: str = "N/A"):
+        """Safely get nested value from dict."""
+        val: object = d  # type: ignore[assignment]
+        for k in keys:
+            if isinstance(val, dict):
+                val = val.get(k)
+                if val is None:
+                    return default
+            else:
+                return default
+        return val
+
+    def _fmt(val: object) -> str:
+        if val is None or val == "N/A":
+            return "N/A"
+        if isinstance(val, float):
+            return f"{val:.1f}"
+        if isinstance(val, bool):
+            return "✓" if val else "✗"
+        return str(val)
+
+    # Build comparison rows
+    rows: list[tuple[str, str, str]] = []
+
+    # GPU
+    rows.append((
+        "GPU",
+        _fmt(_g(r1, "hardware", "gpu_name")),
+        _fmt(_g(r2, "hardware", "gpu_name")),
+    ))
+    # Model
+    rows.append((
+        "Model",
+        _fmt(_g(r1, "model", "name")),
+        _fmt(_g(r2, "model", "name")),
+    ))
+    # Quant
+    rows.append((
+        "Quant",
+        _fmt(_g(r1, "model", "quantization")),
+        _fmt(_g(r2, "model", "quantization")),
+    ))
+    # Backend
+    rows.append((
+        "Backend",
+        _fmt(_g(r1, "hardware", "backend")),
+        _fmt(_g(r2, "hardware", "backend")),
+    ))
+    # ngl
+    rows.append((
+        "ngl",
+        _fmt(_g(r1, "winning_params", "ngl")),
+        _fmt(_g(r2, "winning_params", "ngl")),
+    ))
+    # FA
+    rows.append((
+        "FA",
+        _fmt(_g(r1, "winning_params", "flash_attn")),
+        _fmt(_g(r2, "winning_params", "flash_attn")),
+    ))
+    # Batch
+    rows.append((
+        "Batch",
+        _fmt(_g(r1, "winning_params", "batch_size")),
+        _fmt(_g(r2, "winning_params", "batch_size")),
+    ))
+    # TG tok/s (highlight faster one in green)
+    tg1 = _g(r1, "results", "median_tg_tokens_per_sec")
+    tg2 = _g(r2, "results", "median_tg_tokens_per_sec")
+    tg1_s = _fmt(tg1)
+    tg2_s = _fmt(tg2)
+    if isinstance(tg1, (int, float)) and isinstance(tg2, (int, float)):
+        if tg1 > tg2:
+            tg1_s = f"[green]{tg1_s}[/]"
+        elif tg2 > tg1:
+            tg2_s = f"[green]{tg2_s}[/]"
+    rows.append(("TG tok/s", tg1_s, tg2_s))
+    # PP tok/s (highlight faster one in green)
+    pp1 = _g(r1, "results", "median_pp_tokens_per_sec")
+    pp2 = _g(r2, "results", "median_pp_tokens_per_sec")
+    pp1_s = _fmt(pp1)
+    pp2_s = _fmt(pp2)
+    if isinstance(pp1, (int, float)) and isinstance(pp2, (int, float)):
+        if pp1 > pp2:
+            pp1_s = f"[green]{pp1_s}[/]"
+        elif pp2 > pp1:
+            pp2_s = f"[green]{pp2_s}[/]"
+    rows.append(("PP tok/s", pp1_s, pp2_s))
+    # Config
+    def _config_summary(wp: object) -> str:
+        if not isinstance(wp, dict):
+            return "N/A"
+        parts = []
+        if "ngl" in wp:
+            parts.append(f"ngl={wp['ngl']}")
+        if "flash_attn" in wp:
+            parts.append("FA" if wp["flash_attn"] else "no-FA")
+        if "batch_size" in wp:
+            parts.append(f"batch={wp['batch_size']}")
+        if "ct_k" in wp and "ct_v" in wp:
+            parts.append(f"ctk={wp['ct_k']},ctv={wp['ct_v']}")
+        return ", ".join(parts) if parts else "N/A"
+    rows.append((
+        "Config",
+        _config_summary(_g(r1, "winning_params")),
+        _config_summary(_g(r2, "winning_params")),
+    ))
+    # Command
+    rows.append((
+        "Command",
+        _fmt(_g(r1, "reproducible_command")),
+        _fmt(_g(r2, "reproducible_command")),
+    ))
+
+    table = Table(title="Comparison")
+    table.add_column("Metric", style="bold cyan")
+    table.add_column(f"Result 1 ({Path(result1).name})")
+    table.add_column(f"Result 2 ({Path(result2).name})")
+
+    for metric, val1, val2 in rows:
+        table.add_row(metric, val1, val2)
+
+    console.print(table)
 
 
 def main():

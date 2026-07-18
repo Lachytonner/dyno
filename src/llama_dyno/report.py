@@ -137,9 +137,34 @@ def format_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def save_report_json(report: dict[str, Any], path: str) -> str:
-    """Save report to a JSON file. Returns path."""
+def save_report_json(report: dict[str, Any], path: str | None = None) -> str:
+    """Save report to a JSON file. Returns path.
+
+    If no path is provided, generates a versioned filename in the current
+    directory using the same naming scheme as submit._result_filename():
+    GPU_MODEL_quant_hash_vX.json
+    """
     import os
+
+    if path is None:
+        hw = report.get("hardware", {})
+        model = report.get("model", {})
+        quant = model.get("quantization", "unknown")
+        short_hash = model.get("sha256", "unknown")[:12] if model.get("sha256") else "unknown"
+        version = report.get("dyno_version", "0.0.0")
+
+        gpu_name = hw.get("gpu_name", "unknown-gpu")
+        safe_gpu = "".join(c if c.isalnum() or c in " -_" else "_" for c in gpu_name)
+        safe_gpu = safe_gpu.replace(" ", "_").lower()
+
+        model_name = model.get("name", "unknown-model")
+        if model_name.endswith(".gguf"):
+            model_name = model_name[:-5]
+        safe_model = "".join(c if c.isalnum() or c in " -_" else "_" for c in model_name)
+        safe_model = safe_model.replace(" ", "_").lower()
+
+        path = f"{safe_gpu}_{safe_model}_{quant}_{short_hash}_v{version}.json"
+
     resolved = os.path.abspath(path)
     os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
     with open(resolved, "w") as f:
