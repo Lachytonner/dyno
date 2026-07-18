@@ -430,7 +430,10 @@ def _detect_vram_mib() -> int:
             return int(out.stdout.strip())
     except Exception:
         pass
-    from .detect import _apple_silicon_gpu
+    from .detect import _amd_gpu, _apple_silicon_gpu
+    amd = _amd_gpu()
+    if amd:
+        return amd[1]
     apple = _apple_silicon_gpu()
     return apple[1] if apple else 0
 

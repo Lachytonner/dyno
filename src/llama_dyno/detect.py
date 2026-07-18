@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -173,6 +174,78 @@ def _apple_silicon_gpu() -> tuple[str, int] | None:
     return chip or "Apple Silicon GPU", _detect_ram()
 
 
+def _amd_gpu() -> tuple[str, int] | None:
+    """Detect an AMD GPU via rocm-smi as (name, vram MiB), else None.
+    # ponytail: rocm-smi JSON field names vary by version; parse defensively
+    """
+    if _find_binary("rocm-smi") is None:
+        return None
+
+    name = "Unknown AMD GPU"
+    vram_mib = 0
+
+    # Get product name from JSON (field names differ across ROCm versions)
+    try:
+        out = subprocess.run(
+            ["rocm-smi", "--showproductname", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            data = json.loads(out.stdout)
+            if isinstance(data, dict):
+                for card_info in data.values():
+                    if isinstance(card_info, dict):
+                        name = (
+                            card_info.get("Card series")
+                            or card_info.get("Card model")
+                            or card_info.get("Card SKU")
+                            or name
+                        )
+                        break
+    except Exception:
+        pass
+
+    if name == "Unknown AMD GPU":
+        try:
+            out = subprocess.run(
+                ["rocm-smi", "--showproductname"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode == 0:
+                for line in out.stdout.strip().splitlines():
+                    if ":" in line:
+                        parts = line.split(":", 1)
+                        candidate = parts[1].strip()
+                        if candidate:
+                            name = candidate
+                            break
+        except Exception:
+            pass
+
+    # Get VRAM from rocm-smi --showmeminfo vram --json (bytes)
+    try:
+        out = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            data = json.loads(out.stdout)
+            if isinstance(data, dict):
+                for card_info in data.values():
+                    if isinstance(card_info, dict):
+                        raw = card_info.get("VRAM Total Memory (B)")
+                        if raw is not None:
+                            vram_mib = int(raw) // (1024 * 1024)
+                            break
+    except Exception:
+        pass
+
+    if vram_mib == 0:
+        return None
+
+    return name, vram_mib
+
+
 def _find_binary(name: str) -> str | None:
     """Find a binary in PATH. Returns path or None."""
     # WSL detection: prefer Linux binaries; Windows binaries under /mnt/c/
@@ -267,13 +340,19 @@ def detect_ik_features(binary_path: str | None = None) -> IkFeatures:
 def detect_hardware() -> HardwareFingerprint:
     """Fingerprint the current hardware and detect llama.cpp backend."""
     gpu_name, vram, driver, cuda_ver = _detect_gpu()
-    # No NVIDIA GPU found — fall back to Apple Silicon (unified memory) if present.
+    # No NVIDIA GPU found — fall back to AMD, then Apple Silicon.
     if gpu_name == "Unknown" or vram == 0:
-        apple = _apple_silicon_gpu()
-        if apple:
-            gpu_name, vram = apple
-            driver = f"macOS {platform.mac_ver()[0]}"
+        amd = _amd_gpu()
+        if amd:
+            gpu_name, vram = amd
+            driver = "ROCm"
             cuda_ver = None
+        else:
+            apple = _apple_silicon_gpu()
+            if apple:
+                gpu_name, vram = apple
+                driver = f"macOS {platform.mac_ver()[0]}"
+                cuda_ver = None
     cpu_name, cpu_cores = _detect_cpu()
     ram = _detect_ram()
 
