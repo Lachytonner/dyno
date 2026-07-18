@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from . import __version__ as DYNOVERSION
 from .bench import find_bench_binary, find_server_binary, run_bench, validate_model
 from .detect import detect_hardware
 from .report import build_report, format_json, format_markdown, save_report_json
@@ -35,8 +36,6 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
-
-DYNOVERSION = "0.1.0"
 
 
 @app.callback()
@@ -293,7 +292,7 @@ def tune(
         console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
         raise typer.Exit(1)
 
-    mode = "thorough" if thorough else ("quick" if quick else "quick")
+    mode = "thorough" if thorough else "quick"
 
     # Resolve optimize preset (overrides individual weights)
     if optimize is not None:

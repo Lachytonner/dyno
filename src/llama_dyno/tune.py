@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import itertools
-import sys
-from dataclasses import dataclass, field, asdict
-from typing import Callable
+from dataclasses import dataclass
 
 from rich.console import Console
-from rich.live import Live
 from rich.table import Table
 
 from .bench import (

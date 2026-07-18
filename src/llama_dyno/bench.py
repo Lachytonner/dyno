@@ -6,7 +6,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 
 from .detect import _find_binary
@@ -37,24 +36,6 @@ def validate_model(model_path: str) -> bool:
     if not model_path.lower().endswith(".gguf"):
         return False
     return True
-
-
-def validate_model_loads(model_path: str, binary: str | None = None) -> bool:
-    """Quick check that the model can be loaded by llama-bench."""
-    if binary is None:
-        binary = find_bench_binary()
-    if binary is None:
-        return False
-
-    try:
-        result = subprocess.run(
-            [binary, "-m", model_path, "-p", "1", "-n", "1", "-ngl", "1",
-             "--output-json"],
-            capture_output=True, text=True, timeout=60,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
 
 
 def _parse_bench_output(text: str) -> list[dict]:
@@ -354,21 +335,6 @@ def get_reproducible_command(model_path: str, params: BenchParams) -> str:
     flags = params.to_flag_list()
     cmd = [binary, "-m", model_path] + flags
     return " ".join(cmd)
-
-
-def check_flag_supported(binary: str, flag: str) -> bool:
-    """Check if a flag is supported by the binary via its help output.
-
-    Returns True if the flag appears in the binary's help text.
-    """
-    try:
-        result = subprocess.run(
-            [binary, "-h"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return flag in (result.stdout + result.stderr)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
 
 
 def extract_model_metadata(model_path: str) -> dict:
