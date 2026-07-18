@@ -7,6 +7,7 @@ from typing import Any
 
 from .bench import get_reproducible_command
 from .detect import detect_hardware
+from .ollama import ollama_reproducible_command
 from .types import (
     HardwareFingerprint,
     TuneResult,
@@ -20,6 +21,7 @@ def build_report(
     tune_result: TuneResult,
     hardware: HardwareFingerprint | None = None,
     dyno_version: str = "0.1.0",
+    backend: str | None = None,
 ) -> dict[str, Any]:
     """Build a complete report dict."""
     if hardware is None:
@@ -35,9 +37,15 @@ def build_report(
     )
 
     # Add reproducible command
-    report["reproducible_command"] = get_reproducible_command(
-        model_path, tune_result.winning_params
-    )
+    if backend == "ollama":
+        report["reproducible_command"] = ollama_reproducible_command(
+            model_path, tune_result.winning_params
+        )
+        report["hardware"]["backend"] = "ollama"
+    else:
+        report["reproducible_command"] = get_reproducible_command(
+            model_path, tune_result.winning_params
+        )
 
     # Add all trials
     report["trials"] = []

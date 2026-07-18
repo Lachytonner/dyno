@@ -14,6 +14,11 @@ from rich.table import Table
 from . import __version__ as DYNOVERSION
 from .bench import find_bench_binary, find_server_binary, validate_model
 from .detect import detect_hardware
+from .ollama import (
+    list_ollama_models,
+    ollama_available,
+    ollama_runner,
+)
 from .report import build_report, format_json, format_markdown, save_report_json
 from .submit import submit_report
 from .tune import build_progress_table, run_bench_final, run_tune
@@ -72,6 +77,24 @@ def _check_mark(passed: bool, label: str) -> str:
     if passed:
         return f"[green]✓ PASS[/] {label}"
     return f"[red]✗ FAIL[/] {label}"
+
+
+def _ollama_check(host: str, model: str) -> None:
+    """Verify Ollama is available and the model exists."""
+    import os
+    actual_host = os.environ.get("OLLAMA_HOST", host)
+    if not ollama_available(actual_host):
+        console.print(f"[red]ERROR:[/] Ollama server not reachable at {actual_host}.")
+        console.print("  Start Ollama: [bold]ollama serve[/]")
+        console.print("  Or install from: [bold]https://ollama.com[/]")
+        raise typer.Exit(1)
+    models = list_ollama_models(actual_host)
+    if model not in models:
+        console.print(f"[red]ERROR:[/] Model '{model}' not found in Ollama. Available models:")
+        for m in models:
+            console.print(f"  - {m}")
+        console.print("\nPull it: [bold]ollama pull {model}[/]".format(model=model))
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -187,6 +210,16 @@ def doctor(
                 False, "Cannot test model load (bench binary or model unavailable)",
             ))
 
+    # 7. Ollama check
+    total += 1
+    ollama_ok = ollama_available()
+    if ollama_ok:
+        models = list_ollama_models()
+        console.print(_check_mark(True, f"Ollama running ({len(models)} model{'s' if len(models) != 1 else ''})"))
+        passed += 1
+    else:
+        console.print(_check_mark(False, "Ollama not detected (is the server running?)"))
+
     # Summary
     console.print()
     if passed == total:
@@ -242,6 +275,14 @@ def detect():
         console.print("  brew install llama.cpp")
         console.print("  Or build from: https://github.com/ggml-org/llama.cpp")
 
+    # Ollama presence
+    ollama_ok = ollama_available()
+    if ollama_ok:
+        models = list_ollama_models()
+        status.add_row("Ollama", f"✓ [dim]running ({len(models)} model{'s' if len(models) != 1 else ''})[/]")
+    else:
+        status.add_row("Ollama", "✗ Not detected")
+
     console.print()
     console.print(status)
 
@@ -249,13 +290,20 @@ def detect():
 @app.command()
 def tune(
     model: str = typer.Argument(
-        ..., help="Path to a .gguf model file", exists=True, dir_okay=False
+        ..., help="Path to a .gguf model file (or Ollama model name with --ollama)"
     ),
     quick: bool = typer.Option(
         False, "--quick", help="Quick mode (~10 trials, for fast iteration)"
     ),
     thorough: bool = typer.Option(
         False, "--thorough", help="Thorough mode (~25 trials, best results)"
+    ),
+    ollama: bool = typer.Option(
+        False, "--ollama", help="Benchmark an Ollama model instead of a .gguf file"
+    ),
+    host: str = typer.Option(
+        "http://localhost:11434", "--host",
+        help="Ollama server URL (default: http://localhost:11434)",
     ),
     json_out: str = typer.Option(
         None, "--json-out",
@@ -282,16 +330,6 @@ def tune(
 ):
     """Find the fastest config for this GPU + model combo."""
     log.debug("Starting tune for %s", model)
-    if not validate_model(model):
-        console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
-        raise typer.Exit(1)
-
-    # Check binary
-    if find_bench_binary() is None:
-        console.print("[red]ERROR: llama-bench not found in PATH.[/]")
-        console.print("Install: [bold]brew install llama.cpp[/]")
-        console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
-        raise typer.Exit(1)
 
     mode = "thorough" if thorough else "quick"
 
@@ -308,6 +346,24 @@ def tune(
             raise typer.Exit(1)
         pp_weight, tg_weight = presets[optimize]
 
+    if ollama:
+        _ollama_check(host, model)
+
+        def _ollama_wrapper(m, params=None, binary=None, timeout=300, warmup=True, **kw):
+            return ollama_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
+
+        tune_kw = dict(runner=_ollama_wrapper, sweep_fa=False, sweep_kv=False)
+    else:
+        if not validate_model(model):
+            console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
+            raise typer.Exit(1)
+        if find_bench_binary() is None:
+            console.print("[red]ERROR: llama-bench not found in PATH.[/]")
+            console.print("Install: [bold]brew install llama.cpp[/]")
+            console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
+            raise typer.Exit(1)
+        tune_kw = {}
+
     # Detect hardware to determine backend and ik flags
     hw = detect_hardware()
     is_ik = hw.backend == "ik_llama.cpp"
@@ -320,21 +376,29 @@ def tune(
         tune_mod.console = Console(quiet=True)
         try:
             result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
-                              is_ik=is_ik, ik_flags=ik_flags)
+                              is_ik=is_ik, ik_flags=ik_flags, **tune_kw)
         finally:
             tune_mod.console = orig_console
 
         # Build report (hw already detected above)
         if result.trials:
-            med_pp, med_tg, var_pp, var_tg = run_bench_final(
-                model, result.winning_params, n_runs=3,
-            )
-            result.median_pp_tokens_s = med_pp
-            result.median_tg_tokens_s = med_tg
-            result.variance_pp = var_pp
-            result.variance_tg = var_tg
+            if ollama:
+                r_results = [ollama_runner(model, params=result.winning_params) for _ in range(3)]
+                pp_vals = [r.pp_tokens_s for r in r_results if r.pp_tokens_s is not None]
+                tg_vals = [r.tg_tokens_s for r in r_results if r.tg_tokens_s is not None]
+                result.median_pp_tokens_s = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
+                result.median_tg_tokens_s = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
+            else:
+                med_pp, med_tg, var_pp, var_tg = run_bench_final(
+                    model, result.winning_params, n_runs=3,
+                )
+                result.median_pp_tokens_s = med_pp
+                result.median_tg_tokens_s = med_tg
+                result.variance_pp = var_pp
+                result.variance_tg = var_tg
 
-        report_data = build_report(model, result, hardware=hw, dyno_version=DYNOVERSION)
+        report_data = build_report(model, result, hardware=hw, dyno_version=DYNOVERSION,
+                                    backend="ollama" if ollama else None)
         save_report_json(report_data, json_out)
 
         if not quiet:
@@ -356,7 +420,7 @@ def tune(
         return
 
     result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
-                      is_ik=is_ik, ik_flags=ik_flags)
+                      is_ik=is_ik, ik_flags=ik_flags, **tune_kw)
 
     if result.trials:
         console.print()
@@ -385,7 +449,7 @@ def tune(
 @app.command()
 def bench(
     model: str = typer.Argument(
-        ..., help="Path to a .gguf model file", exists=True, dir_okay=False
+        ..., help="Path to a .gguf model file (or Ollama model name with --ollama)"
     ),
     ngl: int = typer.Option(99, "--ngl", "-ngl", help="GPU layers to offload"),
     flash_attn: bool = typer.Option(True, "--fa/--no-fa", help="Flash attention"),
@@ -398,17 +462,26 @@ def bench(
     fmoe: bool = typer.Option(False, "--fmoe", help="Fast MoE (ik_llama.cpp)"),
     rtr: bool = typer.Option(False, "--rtr", help="Runtime reorder (ik_llama.cpp)"),
     amb: bool = typer.Option(False, "--amb", help="Attn mem bound (ik_llama.cpp)"),
+    ollama: bool = typer.Option(
+        False, "--ollama", help="Benchmark an Ollama model instead of a .gguf file"
+    ),
+    host: str = typer.Option(
+        "http://localhost:11434", "--host",
+        help="Ollama server URL (default: http://localhost:11434)",
+    ),
 ):
     """Run the winning config 3x, report median with variance."""
-    if not validate_model(model):
-        console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
-        raise typer.Exit(1)
-
-    if find_bench_binary() is None:
-        console.print("[red]ERROR: llama-bench not found in PATH.[/]")
-        console.print("Install: [bold]brew install llama.cpp[/]")
-        console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
-        raise typer.Exit(1)
+    if ollama:
+        _ollama_check(host, model)
+    else:
+        if not validate_model(model):
+            console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
+            raise typer.Exit(1)
+        if find_bench_binary() is None:
+            console.print("[red]ERROR: llama-bench not found in PATH.[/]")
+            console.print("Install: [bold]brew install llama.cpp[/]")
+            console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
+            raise typer.Exit(1)
 
     params = BenchParams(
         ngl=ngl,
@@ -427,7 +500,16 @@ def bench(
 
     console.print(f"[bold]Benchmarking[/] with {runs} runs...")
 
-    med_pp, med_tg, var_pp, var_tg = run_bench_final(model, params, n_runs=runs)
+    if ollama:
+        results = [ollama_runner(model, params=params) for _ in range(runs)]
+        pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
+        tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
+        med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
+        med_tg = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
+        var_pp = 0.0
+        var_tg = 0.0
+    else:
+        med_pp, med_tg, var_pp, var_tg = run_bench_final(model, params, n_runs=runs)
 
     table = Table(title="Benchmark Results", box=None)
     table.add_column("Metric", style="bold cyan")

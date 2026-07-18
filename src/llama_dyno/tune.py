@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from rich.console import Console
 from rich.table import Table
 
+from collections.abc import Callable
+
 from .bench import (
     extract_model_metadata,
     find_bench_binary,
@@ -98,9 +100,11 @@ def _run_trial(
     params: BenchParams,
     binary: str | None,
     config: TuneConfig,
+    runner: Callable | None = None,
 ) -> TrialResult:
     """Run a single trial and return result."""
-    result = run_bench(
+    _run = runner or run_bench
+    result = _run(
         model_path=model_path,
         params=params,
         binary=binary,
@@ -121,6 +125,9 @@ def _coarse_sweep_ngl(
     tg_weight: float = 0.7,
     is_moe_metadata: bool = False,
     ik_flags: dict | None = None,
+    runner: Callable | None = None,
+    sweep_fa: bool = True,
+    sweep_kv: bool = True,
 ) -> BenchParams | None:
     """Phase 1: Find max working ngl level and initial good params.
 
@@ -156,9 +163,11 @@ def _coarse_sweep_ngl(
         else:
             ngl_values = [50, 25, 99, 10]
 
-    fa_values = [True, False] if config.mode == "thorough" else [True]
+    fa_values = [True]
+    if sweep_fa and config.mode == "thorough":
+        fa_values = [True, False]
     kv_quants = ["f16"]
-    if config.mode == "thorough":
+    if sweep_kv and config.mode == "thorough":
         kv_quants = ["f16", "q8_0", "q4_0"]
 
     # Try high-impact combos first
@@ -205,7 +214,7 @@ def _coarse_sweep_ngl(
             if any(t.params == params for t in trials):
                 continue
 
-            result = _run_trial(model_path, params, binary, config)
+            result = _run_trial(model_path, params, binary, config, runner=runner)
             trials.append(result)
 
             console.clear()
@@ -247,6 +256,7 @@ def _hill_climb(
     tg_weight: float = 0.7,
     is_moe_metadata: bool = False,
     ik_flags: dict | None = None,
+    runner: Callable | None = None,
 ) -> BenchParams:
     """Phase 2: Hill-climb on batch size and threads.
 
@@ -289,7 +299,7 @@ def _hill_climb(
             if any(t.params == test_params for t in trials):
                 continue
 
-            result = _run_trial(model_path, test_params, binary, config)
+            result = _run_trial(model_path, test_params, binary, config, runner=runner)
             trials.append(result)
 
             console.clear()
@@ -329,7 +339,7 @@ def _hill_climb(
             if any(t.params == test_params for t in trials):
                 continue
 
-            result = _run_trial(model_path, test_params, binary, config)
+            result = _run_trial(model_path, test_params, binary, config, runner=runner)
             trials.append(result)
 
             console.clear()
@@ -380,7 +390,7 @@ def _hill_climb(
             if any(t.params == test_params for t in trials):
                 continue
 
-            result = _run_trial(model_path, test_params, binary, config)
+            result = _run_trial(model_path, test_params, binary, config, runner=runner)
             trials.append(result)
 
             console.clear()
@@ -442,6 +452,9 @@ def run_tune(
     tg_weight: float = 0.7,
     is_ik: bool = False,
     ik_flags: dict | None = None,
+    runner: Callable | None = None,
+    sweep_fa: bool = True,
+    sweep_kv: bool = True,
 ) -> TuneResult:
     """Run the full tuning pipeline on a model.
 
@@ -459,8 +472,8 @@ def run_tune(
     if trials is None:
         trials = []
 
-    binary = find_bench_binary()
-    if binary is None:
+    binary = find_bench_binary() if runner is None else None
+    if binary is None and runner is None:
         console.print("[red]ERROR: llama-bench not found in PATH.[/]")
         console.print("Install llama.cpp: [bold]brew install llama.cpp[/]")
         console.print("Or build from source: [bold]https://github.com/ggml-org/llama.cpp[/]")
@@ -470,38 +483,39 @@ def run_tune(
         )
 
     # Determine backend
-    is_ik = is_ik or ("ik" in binary.lower() if binary else False)
+    is_ik = is_ik or (binary is not None and "ik" in binary.lower())
 
-    # Extract model metadata
-    metadata = extract_model_metadata(model_path)
-    if metadata.get("build_commit"):
-        console.print(f"  Build commit: {metadata['build_commit']}")
-    if metadata.get("model_n_params"):
-        console.print(f"  Model params: {metadata['model_n_params']}")
-    if metadata.get("model_type"):
-        console.print(f"  Model type: {metadata['model_type']}")
-    if metadata.get("model_size"):
-        # model_size is in bytes, convert to GiB for readability
-        size_gib = metadata['model_size'] / (1024 ** 3)
-        console.print(f"  Model size (llama-bench): {size_gib:.2f} GiB")
-    console.print()
+    # Extract model metadata (skip for custom runners like Ollama)
+    is_moe_metadata = False
+    if runner is None and binary is not None:
+        metadata = extract_model_metadata(model_path)
+        if metadata.get("build_commit"):
+            console.print(f"  Build commit: {metadata['build_commit']}")
+        if metadata.get("model_n_params"):
+            console.print(f"  Model params: {metadata['model_n_params']}")
+        if metadata.get("model_type"):
+            console.print(f"  Model type: {metadata['model_type']}")
+        if metadata.get("model_size"):
+            size_gib = metadata['model_size'] / (1024 ** 3)
+            console.print(f"  Model size (llama-bench): {size_gib:.2f} GiB")
+        console.print()
 
-    # Determine MoE status from metadata
-    is_moe_metadata = metadata.get("is_moe", False)
-    if is_moe_metadata:
-        console.print("  Model type: MoE (enabling MoE-specific tuning)")
-    else:
-        console.print("  Model type: Dense (skipping MoE-specific tuning)")
-    console.print()
+        is_moe_metadata = metadata.get("is_moe", False)
+        if is_moe_metadata:
+            console.print("  Model type: MoE (enabling MoE-specific tuning)")
+        else:
+            console.print("  Model type: Dense (skipping MoE-specific tuning)")
+        console.print()
 
     vram_total = _detect_vram_mib()
-    model_size_mib = _estimate_model_size(model_path)
+    model_size_mib = _estimate_model_size(model_path) if runner is None else 0
 
     console.print(f"[bold]Dyno Tuning[/] - mode: {mode}")
     console.print(f"  Model: {model_path}")
-    console.print(f"  Model size: {model_size_mib} MiB")
+    if runner is None:
+        console.print(f"  Model size: {model_size_mib} MiB")
     console.print(f"  VRAM: {vram_total} MiB")
-    console.print(f"  Backend: {'ik_llama.cpp' if is_ik else 'llama.cpp'}")
+    console.print(f"  Backend: {'ik_llama.cpp' if is_ik else 'llama.cpp' if runner is None else 'ollama'}")
     if is_ik and ik_flags:
         parts = []
         if ik_flags.get("fmoe"):
@@ -520,13 +534,14 @@ def run_tune(
         model_path, vram_total, model_size_mib, binary, config, trials, is_ik,
         pp_weight=pp_weight, tg_weight=tg_weight,
         is_moe_metadata=is_moe_metadata, ik_flags=ik_flags,
+        runner=runner, sweep_fa=sweep_fa, sweep_kv=sweep_kv,
     )
 
     if best_params is None:
         # Everything OOM'd; try minimal config
         console.print("[yellow]All trials OOM'd. Trying minimal config...[/]")
         best_params = BenchParams(ngl=0, flash_attn=False, pp=config.pp, tg=config.tg)
-        result = _run_trial(model_path, best_params, binary, config)
+        result = _run_trial(model_path, best_params, binary, config, runner=runner)
         trials.append(result)
         score = _score_trial(result, pp_weight, tg_weight)
         if score < 0:
@@ -552,6 +567,7 @@ def run_tune(
                 model_path, best_params, binary, config, trials, is_ik,
                 pp_weight=pp_weight, tg_weight=tg_weight,
                 is_moe_metadata=is_moe_metadata, ik_flags=ik_flags,
+                runner=runner,
             )
     else:
         # Too few valid trials, still do hill climb
@@ -559,6 +575,7 @@ def run_tune(
         best_params = _hill_climb(
             model_path, best_params, binary, config, trials, is_ik,
             pp_weight=pp_weight, tg_weight=tg_weight,
+            runner=runner,
         )
 
     # Find best trial
