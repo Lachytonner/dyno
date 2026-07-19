@@ -1,6 +1,6 @@
 # 🏎️ Dyno — llama.cpp Auto-Tuner & Benchmark
 
-**Dyno** is an open-source CLI that auto-tunes and benchmarks [llama.cpp](https://github.com/ggml-org/llama.cpp) / [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) inference on NVIDIA, AMD (ROCm), and Apple Silicon GPUs, producing reproducible, shareable results.
+**Dyno** is an open-source CLI that auto-tunes and benchmarks LLM inference on NVIDIA, AMD (ROCm), and Apple Silicon GPUs — works with Ollama, LM Studio, and llama.cpp. Produces reproducible, shareable results.
 
 ```bash
 pipx install llama-dyno
@@ -19,17 +19,17 @@ dyno submit ~/models/mistral-7b.Q4_K_M.gguf
 # 1. Install
 pipx install llama-dyno
 
-# 2. Check your hardware
+# 2. See your hardware and available models
 dyno detect
 
-# 3. Auto-tune a model
-dyno tune ~/Downloads/my-model.q4_k_m.gguf
+# 3a. Optimize an Ollama model (auto-detected — no flags needed)
+dyno optimize llama3
 
-# 4. Run the final benchmark
-dyno bench ~/Downloads/my-model.q4_k_m.gguf --ngl 99 --fa
+# 3b. Optimize an LM Studio model (auto-detected — no flags needed)
+dyno optimize llama-3.2-3b
 
-# 5. Generate a report
-dyno report ~/Downloads/my-model.q4_k_m.gguf
+# 3c. Or optimize a GGUF file on disk
+dyno optimize ~/Downloads/my-model.q4_k_m.gguf
 ```
 
 ## Prerequisites

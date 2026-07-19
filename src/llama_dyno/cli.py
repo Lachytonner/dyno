@@ -42,7 +42,7 @@ def setup_logging(level: str = "WARNING") -> None:
 
 app = typer.Typer(
     name="dyno",
-    help="Auto-tune and benchmark llama.cpp / ik_llama.cpp inference on NVIDIA GPUs.",
+    help="Auto-tune and benchmark LLM inference — Ollama, LM Studio, and llama.cpp.",
     no_args_is_help=True,
 )
 console = Console()
@@ -116,6 +116,89 @@ def _lmstudio_check(host: str, model: str) -> None:
             console.print(f"  - {m}")
         console.print("\nLoad it: [bold]lms load {model}[/]".format(model=model))
         raise typer.Exit(1)
+
+
+def _resolve_backend(model: str, host: str | None = None) -> tuple[str, str]:
+    """Auto-detect backend for a model name. Returns (backend, resolved_name).
+
+    backend is one of: 'gguf', 'ollama', 'lmstudio', 'unknown'.
+    resolved_name is the matched model name (may differ from input on prefix/substring match).
+    """
+    if validate_model(model):
+        return "gguf", model
+
+    ollama_url = host or "http://localhost:11434"
+    lmstudio_url = "http://localhost:1234/v1"
+
+    # Ollama: exact → prefix → substring
+    if ollama_available(ollama_url):
+        models = list_ollama_models(ollama_url)
+        for m in models:
+            if m == model:
+                return "ollama", m
+        for m in models:
+            if m.lower().startswith(model.lower()):
+                return "ollama", m
+        for m in models:
+            if model.lower() in m.lower():
+                return "ollama", m
+
+    # LM Studio: exact → prefix → substring
+    if lmstudio_available(lmstudio_url):
+        models = list_lmstudio_models(lmstudio_url)
+        for m in models:
+            if m == model:
+                return "lmstudio", m
+        for m in models:
+            if m.lower().startswith(model.lower()):
+                return "lmstudio", m
+        for m in models:
+            if model.lower() in m.lower():
+                return "lmstudio", m
+
+    return "unknown", model
+
+
+def _build_runner(backend: str):
+    """Build (runner_wrapper, tune_kw) for a backend.
+
+    Returns (None, {}) for gguf — caller handles llama-bench binary check.
+    Raises typer.Exit(1) if gguf backend but llama-bench is missing.
+    """
+    if backend == "ollama":
+        def _r(m, params=None, binary=None, timeout=300, warmup=True, **kw):
+            return ollama_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
+        return _r, {"sweep_fa": False, "sweep_kv": False}
+    elif backend == "lmstudio":
+        def _r(m, params=None, binary=None, timeout=300, warmup=True, **kw):
+            return lmstudio_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
+        return _r, {"sweep_fa": False, "sweep_kv": False}
+    else:
+        if find_bench_binary() is None:
+            console.print("[red]ERROR: llama-bench not found in PATH.[/]")
+            console.print("Install: [bold]brew install llama.cpp[/]")
+            raise typer.Exit(1)
+        return None, {}
+
+
+def _run_final_bench(backend: str, model: str, params, n_runs: int = 3):
+    """Run final benchmark, returning (med_pp, med_tg, var_pp, var_tg)."""
+    if backend == "ollama":
+        results = [ollama_runner(model, params=params) for _ in range(n_runs)]
+        pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
+        tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
+        med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
+        med_tg = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
+        return med_pp, med_tg, 0.0, 0.0
+    elif backend == "lmstudio":
+        results = [lmstudio_runner(model, params=params) for _ in range(n_runs)]
+        pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
+        tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
+        med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
+        med_tg = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
+        return med_pp, med_tg, 0.0, 0.0
+    else:
+        return run_bench_final(model, params, n_runs=n_runs)
 
 
 @app.command()
@@ -308,22 +391,41 @@ def detect():
 
     # Ollama presence
     ollama_ok = ollama_available()
+    ollama_models = list_ollama_models() if ollama_ok else []
     if ollama_ok:
-        models = list_ollama_models()
-        status.add_row("Ollama", f"✓ [dim]running ({len(models)} model{'s' if len(models) != 1 else ''})[/]")
+        status.add_row("Ollama", f"✓ [dim]running ({len(ollama_models)} model{'s' if len(ollama_models) != 1 else ''})[/]")
     else:
         status.add_row("Ollama", "✗ Not detected")
 
     # LM Studio presence
     lmstudio_ok = lmstudio_available()
+    lmstudio_models = list_lmstudio_models() if lmstudio_ok else []
     if lmstudio_ok:
-        models = list_lmstudio_models()
-        status.add_row("LM Studio", f"✓ [dim]running ({len(models)} model{'s' if len(models) != 1 else ''})[/]")
+        status.add_row("LM Studio", f"✓ [dim]running ({len(lmstudio_models)} model{'s' if len(lmstudio_models) != 1 else ''})[/]")
     else:
         status.add_row("LM Studio", "✗ Not detected")
 
     console.print()
     console.print(status)
+
+    # Show available models with suggested commands
+    if ollama_models:
+        console.print()
+        t = Table(title="Ollama Models", box=None)
+        t.add_column("Model", style="bold cyan")
+        t.add_column("Quick Command", style="dim")
+        for m in ollama_models:
+            t.add_row(m, f"dyno optimize {m}")
+        console.print(t)
+
+    if lmstudio_models:
+        console.print()
+        t = Table(title="LM Studio Models", box=None)
+        t.add_column("Model", style="bold cyan")
+        t.add_column("Quick Command", style="dim")
+        for m in lmstudio_models:
+            t.add_row(m, f"dyno optimize {m}")
+        console.print(t)
 
 
 @app.command()
@@ -389,29 +491,28 @@ def tune(
         pp_weight, tg_weight = presets[optimize]
 
     if ollama:
+        backend = "ollama"
+        resolved = model
         _ollama_check(host, model)
-
-        def _ollama_wrapper(m, params=None, binary=None, timeout=300, warmup=True, **kw):
-            return ollama_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
-
-        tune_kw = dict(runner=_ollama_wrapper, sweep_fa=False, sweep_kv=False)
     elif lmstudio:
+        backend = "lmstudio"
+        resolved = model
         _lmstudio_check(host, model)
-
-        def _lmstudio_wrapper(m, params=None, binary=None, timeout=300, warmup=True, **kw):
-            return lmstudio_runner(m, params=params, binary=binary, timeout=timeout, warmup=warmup, **kw)
-
-        tune_kw = dict(runner=_lmstudio_wrapper, sweep_fa=False, sweep_kv=False)
     else:
-        if not validate_model(model):
-            console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
+        backend, resolved = _resolve_backend(model, host)
+        if backend == "unknown":
+            console.print(f"[red]ERROR:[/] Model '{model}' not found.")
+            console.print("  - Not a .gguf file on disk")
+            console.print("  - Not found in running Ollama instance")
+            console.print("  - Not found in running LM Studio instance")
+            console.print("\n[yellow]Tip:[/] Run [bold]dyno detect[/] to see available models.")
             raise typer.Exit(1)
-        if find_bench_binary() is None:
-            console.print("[red]ERROR: llama-bench not found in PATH.[/]")
-            console.print("Install: [bold]brew install llama.cpp[/]")
-            console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
-            raise typer.Exit(1)
-        tune_kw = {}
+        if backend == "ollama":
+            _ollama_check(host, resolved)
+        elif backend == "lmstudio":
+            _lmstudio_check(host, resolved)
+
+    runner, tune_kw = _build_runner(backend)
 
     # Detect hardware to determine backend and ik flags
     hw = detect_hardware()
@@ -424,37 +525,21 @@ def tune(
         orig_console = tune_mod.console
         tune_mod.console = Console(quiet=True)
         try:
-            result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
-                              is_ik=is_ik, ik_flags=ik_flags, **tune_kw)
+            result = run_tune(resolved, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
+                              is_ik=is_ik, ik_flags=ik_flags, runner=runner, **tune_kw)
         finally:
             tune_mod.console = orig_console
 
         # Build report (hw already detected above)
         if result.trials:
-            if ollama:
-                r_results = [ollama_runner(model, params=result.winning_params) for _ in range(3)]
-                pp_vals = [r.pp_tokens_s for r in r_results if r.pp_tokens_s is not None]
-                tg_vals = [r.tg_tokens_s for r in r_results if r.tg_tokens_s is not None]
-                result.median_pp_tokens_s = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
-                result.median_tg_tokens_s = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
-            elif lmstudio:
-                r_results = [lmstudio_runner(model, params=result.winning_params) for _ in range(3)]
-                pp_vals = [r.pp_tokens_s for r in r_results if r.pp_tokens_s is not None]
-                tg_vals = [r.tg_tokens_s for r in r_results if r.tg_tokens_s is not None]
-                result.median_pp_tokens_s = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
-                result.median_tg_tokens_s = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
-            else:
-                med_pp, med_tg, var_pp, var_tg = run_bench_final(
-                    model, result.winning_params, n_runs=3,
-                )
-                result.median_pp_tokens_s = med_pp
-                result.median_tg_tokens_s = med_tg
-                result.variance_pp = var_pp
-                result.variance_tg = var_tg
-
-        backend = "ollama" if ollama else ("lmstudio" if lmstudio else None)
-        report_data = build_report(model, result, hardware=hw, dyno_version=DYNOVERSION,
-                                    backend=backend)
+            med_pp, med_tg, var_pp, var_tg = _run_final_bench(backend, resolved, result.winning_params)
+            result.median_pp_tokens_s = med_pp
+            result.median_tg_tokens_s = med_tg
+            result.variance_pp = var_pp
+            result.variance_tg = var_tg
+        report_backend = backend if backend in ("ollama", "lmstudio") else None
+        report_data = build_report(resolved, result, hardware=hw, dyno_version=DYNOVERSION,
+                                    backend=report_backend)
         save_report_json(report_data, json_out)
 
         if not quiet:
@@ -472,11 +557,11 @@ def tune(
                 title="🏆 Best Config",
             ))
             fa_flag = "--fa" if wp.flash_attn else "--no-fa"
-            console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(model)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
+            console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(resolved)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
         return
 
-    result = run_tune(model, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
-                      is_ik=is_ik, ik_flags=ik_flags, **tune_kw)
+    result = run_tune(resolved, mode=mode, pp_weight=pp_weight, tg_weight=tg_weight,
+                      is_ik=is_ik, ik_flags=ik_flags, runner=runner, **tune_kw)
 
     if result.trials:
         console.print()
@@ -499,7 +584,7 @@ def tune(
 
     # Suggest next step
     fa_flag = "--fa" if wp.flash_attn else "--no-fa"
-    console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(model)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
+    console.print(f"\n[yellow]Next:[/] [bold]dyno bench {_truncate_model_path(resolved)} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --ubatch {wp.ubatch_size} --threads {wp.threads}[/]")
 
 
 @app.command()
@@ -531,14 +616,23 @@ def bench(
 ):
     """Run the winning config 3x, report median with variance."""
     if ollama:
+        backend = "ollama"
+        resolved = model
         _ollama_check(host, model)
     elif lmstudio:
+        backend = "lmstudio"
+        resolved = model
         _lmstudio_check(host, model)
     else:
-        if not validate_model(model):
-            console.print(f"[red]ERROR:[/] '{model}' is not a valid .gguf file.")
+        backend, resolved = _resolve_backend(model, host)
+        if backend == "unknown":
+            console.print(f"[red]ERROR:[/] Model '{model}' not found.")
             raise typer.Exit(1)
-        if find_bench_binary() is None:
+        if backend == "ollama":
+            _ollama_check(host, resolved)
+        elif backend == "lmstudio":
+            _lmstudio_check(host, resolved)
+        elif find_bench_binary() is None:
             console.print("[red]ERROR: llama-bench not found in PATH.[/]")
             console.print("Install: [bold]brew install llama.cpp[/]")
             console.print("Or build from: [bold]https://github.com/ggml-org/llama.cpp[/]")
@@ -561,24 +655,7 @@ def bench(
 
     console.print(f"[bold]Benchmarking[/] with {runs} runs...")
 
-    if ollama:
-        results = [ollama_runner(model, params=params) for _ in range(runs)]
-        pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
-        tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
-        med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
-        med_tg = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
-        var_pp = 0.0
-        var_tg = 0.0
-    elif lmstudio:
-        results = [lmstudio_runner(model, params=params) for _ in range(runs)]
-        pp_vals = [r.pp_tokens_s for r in results if r.pp_tokens_s is not None]
-        tg_vals = [r.tg_tokens_s for r in results if r.tg_tokens_s is not None]
-        med_pp = sorted(pp_vals)[len(pp_vals) // 2] if pp_vals else 0.0
-        med_tg = sorted(tg_vals)[len(tg_vals) // 2] if tg_vals else 0.0
-        var_pp = 0.0
-        var_tg = 0.0
-    else:
-        med_pp, med_tg, var_pp, var_tg = run_bench_final(model, params, n_runs=runs)
+    med_pp, med_tg, var_pp, var_tg = _run_final_bench(backend, resolved, params, n_runs=runs)
 
     table = Table(title="Benchmark Results", box=None)
     table.add_column("Metric", style="bold cyan")
@@ -601,7 +678,106 @@ def bench(
         console.print()
         console.print(f"[green]✓[/] Generation: {med_tg:.1f} tok/s | Prompt: {med_pp:.1f} tok/s")
         console.print(f"  Config: ngl={ngl}, fa={flash_attn}, ctk={ctk}, ctv={ctv}, b={batch}, ub={ubatch}, t={threads}")
-        console.print(f"\n[yellow]Next:[/] [bold]dyno report {_truncate_model_path(model)}[/] to generate a shareable report")
+        console.print(f"\n[yellow]Next:[/] [bold]dyno report {_truncate_model_path(resolved)}[/] to generate a shareable report")
+
+
+@app.command()
+def optimize(
+    model: str = typer.Argument(
+        ..., help="Model — .gguf file path, Ollama model name, or LM Studio model name"
+    ),
+    quick: bool = typer.Option(
+        True, "--quick/--thorough", help="Quick mode (~10 trials, default) or thorough (~25 trials)"
+    ),
+    host: str = typer.Option(
+        "http://localhost:11434", "--host",
+        help="Ollama server URL (for non-default ports)",
+    ),
+    json_out: str = typer.Option(
+        None, "--json", "-j", help="Save JSON report to path"
+    ),
+    ollama: bool = typer.Option(
+        False, "--ollama", help="Force Ollama backend (skip auto-detection)"
+    ),
+    lmstudio: bool = typer.Option(
+        False, "--lmstudio", help="Force LM Studio backend (skip auto-detection)"
+    ),
+):
+    """Auto-detect, tune, benchmark, and report — one command.
+
+    Works with GGUF files, Ollama models, and LM Studio models.
+    Auto-detects the backend — no --ollama/--lmstudio flags needed.
+    """
+    mode = "thorough" if not quick else "quick"
+
+    if ollama:
+        backend = "ollama"
+        resolved = model
+        _ollama_check(host, model)
+    elif lmstudio:
+        backend = "lmstudio"
+        resolved = model
+        _lmstudio_check(host, model)
+    else:
+        backend, resolved = _resolve_backend(model, host)
+        if backend == "unknown":
+            console.print(f"[red]ERROR:[/] Model '{model}' not found.")
+            console.print("\n[yellow]Tip:[/] Run [bold]dyno detect[/] to see available models.")
+            raise typer.Exit(1)
+        if backend == "ollama":
+            _ollama_check(host, resolved)
+        elif backend == "lmstudio":
+            _lmstudio_check(host, resolved)
+
+    runner, tune_kw = _build_runner(backend)
+
+    hw = detect_hardware()
+    console.print(f"[dim]GPU: {hw.gpu_name} ({hw.vram_total_mib} MiB) | Backend: {backend}[/]")
+
+    console.print(f"\n[bold]⚙️  Phase 1/3: Tuning[/] ({mode} mode)...")
+    is_ik = hw.backend == "ik_llama.cpp"
+    ik_flags = getattr(hw, "ik_features", None)
+    result = run_tune(resolved, mode=mode, is_ik=is_ik, ik_flags=ik_flags,
+                       runner=runner, **tune_kw)
+
+    if not result.trials:
+        console.print("[red]ERROR:[/] No successful tuning trials.")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold]🔬 Phase 2/3: Benchmarking[/] (3 runs)...")
+    med_pp, med_tg, var_pp, var_tg = _run_final_bench(backend, resolved, result.winning_params)
+    result.median_pp_tokens_s = med_pp
+    result.median_tg_tokens_s = med_tg
+    result.variance_pp = var_pp
+    result.variance_tg = var_tg
+
+    console.print(f"\n[bold]📋 Phase 3/3: Report[/]")
+    report_backend = backend if backend in ("ollama", "lmstudio") else None
+    report_data = build_report(resolved, result, hardware=hw, dyno_version=DYNOVERSION,
+                                backend=report_backend)
+
+    console.print()
+    console.print("[bold]🏆 Results[/]")
+    if med_tg:
+        console.print(f"  Generation: [bold green]{med_tg:.1f} tok/s[/]")
+    if med_pp:
+        console.print(f"  Prompt processing: [bold green]{med_pp:.1f} tok/s[/]")
+
+    if backend in ("ollama", "lmstudio"):
+        console.print(f"\n[dim]  Backend: {backend}[/]")
+        quick_flag = " --quick" if quick else ""
+        console.print(f"  Reproduce: [bold]dyno optimize {resolved}{quick_flag}[/]")
+    else:
+        wp = result.winning_params
+        fa_flag = "--fa" if wp.flash_attn else "--no-fa"
+        console.print(f"\n[dim]  Config: ngl={wp.ngl} {fa_flag} ctk={wp.ct_k} ctv={wp.ct_v} batch={wp.batch_size} threads={wp.threads or 'auto'}[/]")
+        console.print(f"  Reproduce: [bold]dyno bench {resolved} --ngl {wp.ngl} {fa_flag} --ctk {wp.ct_k} --ctv {wp.ct_v} --batch {wp.batch_size} --threads {wp.threads}[/]")
+
+    gpu_slug = hw.gpu_name.replace(" ", "_")
+    model_slug = Path(resolved).stem if backend == "gguf" else resolved.replace("/", "_").replace(":", "_")
+    default_path = json_out or f"dyno-report-{gpu_slug}-{model_slug}.json"
+    save_report_json(report_data, default_path)
+    console.print(f"\n[green]✓[/] Report saved: {default_path}")
 
 
 @app.command()
